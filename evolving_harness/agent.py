@@ -12,13 +12,13 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .core.message import Message
+from .core.message import Message, ToolCall
 from .models.base import ChatModel, Usage
 from .models.mock import MockChatModel
 from .models.openai_compat import OpenAIChatModel
@@ -176,6 +176,118 @@ class AgentState:
 
 
 @dataclass(slots=True)
+class RunState:
+    """Dynamic run state: the loop's only mutable surface.
+
+    Persisted via Checkpointer at clean step boundaries so a run can be resumed.
+    """
+
+    run_id: str
+    agent_name: str
+    agent_version: int
+    agent_hash: str
+    task: str
+    status: str
+    step: int
+    messages: list[Message] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
+    pending: list[ToolCall] = field(default_factory=list)
+    parent_run_id: str | None = None
+    created_at: float = 0.0
+
+    @classmethod
+    def new(
+        cls,
+        run_id: str,
+        state: AgentState,
+        task: str,
+        *,
+        parent_run_id: str | None = None,
+    ) -> RunState:
+        return cls(
+            run_id=run_id,
+            agent_name=state.name,
+            agent_version=state.version,
+            agent_hash=state.hash,
+            task=task,
+            status="running",
+            step=0,
+            messages=[
+                Message(role="system", content=state.render_system_prompt()),
+                Message(role="user", content=task),
+            ],
+            parent_run_id=parent_run_id,
+            created_at=time.time(),
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "agent_name": self.agent_name,
+            "agent_version": self.agent_version,
+            "agent_hash": self.agent_hash,
+            "task": self.task,
+            "status": self.status,
+            "step": self.step,
+            "messages": [msg.to_openai() for msg in self.messages],
+            "usage": self.usage.to_dict(),
+            "pending": [call.to_openai() for call in self.pending],
+            "parent_run_id": self.parent_run_id,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RunState:
+        usage = data.get("usage") or {}
+        return cls(
+            run_id=data["run_id"],
+            agent_name=data.get("agent_name", ""),
+            agent_version=data.get("agent_version", 0),
+            agent_hash=data.get("agent_hash", ""),
+            task=data.get("task", ""),
+            status=data.get("status", "running"),
+            step=data.get("step", 0),
+            messages=[Message.from_openai(msg) for msg in data.get("messages", [])],
+            usage=Usage(
+                prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                completion_tokens=int(usage.get("completion_tokens", 0)),
+            ),
+            pending=[ToolCall.from_openai(call) for call in data.get("pending", [])],
+            parent_run_id=data.get("parent_run_id"),
+            created_at=float(data.get("created_at", 0.0)),
+        )
+
+
+class Checkpointer:
+    """Writes RunState snapshots so runs can resume after a restart."""
+
+    def __init__(self, trace_dir: str | Path = "traces") -> None:
+        self.dir = Path(trace_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    def path_for(self, run_id: str) -> Path:
+        return self.dir / f"{run_id}.checkpoint.json"
+
+    def save(self, state: RunState) -> None:
+        path = self.path_for(state.run_id)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(state.snapshot(), ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        tmp.replace(path)
+
+    def load(self, run_id: str) -> RunState | None:
+        path = self.path_for(run_id)
+        if not path.is_file():
+            return None
+        try:
+            return RunState.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except (ValueError, KeyError, TypeError):
+            return None
+
+
+@dataclass(slots=True)
 class RunResult:
     run_id: str
     final: str
@@ -203,38 +315,95 @@ class Agent:
         self.state = state
         self.trace_dir = trace_dir
 
-    async def run(self, task: str, run_id: str | None = None) -> RunResult:
-        run_id = run_id or uuid.uuid4().hex[:12]
-        runtime = self.state.runtime()
-        messages = [
-            Message(role="system", content=self.state.render_system_prompt()),
-            Message(role="user", content=task),
-        ]
-        usage = Usage()
-        step = 0
-        tracer = TraceRecorder(run_id, self.trace_dir)
-        tracer.event(
-            "run.start",
-            task=task,
-            model=getattr(self.model, "name", "unknown"),
-            tools=self.tools.names(),
-            max_steps=self.state.max_steps,
-            state={
-                "name": self.state.name,
-                "version": self.state.version,
-                "hash": self.state.hash,
-                "path": str(self.state.path),
-            },
-            runtime=runtime,
-        )
+    async def run(
+        self,
+        task: str,
+        run_id: str | None = None,
+        *,
+        resume: bool = False,
+    ) -> RunResult:
+        checkpointer = Checkpointer(self.trace_dir)
+        tracer: TraceRecorder
+        state: RunState
+        resumed = False
+
+        if resume:
+            if run_id is None:
+                raise ValueError("resume requires run_id")
+            saved = checkpointer.load(run_id)
+            if saved is None:
+                raise RuntimeError(f"no checkpoint for run {run_id}")
+            if saved.agent_name != self.state.name or saved.agent_hash != self.state.hash:
+                raise AgentConfigError("checkpoint agent does not match current YAML")
+            state = saved
+            resumed = True
+            tracer = TraceRecorder(run_id, self.trace_dir)
+            tracer.event("run.recover", from_step=state.step, agent_hash=state.agent_hash)
+            # Tool calls dispatched but never settled before a restart: keep the
+            # intent, mark the outcome unknown, and never re-dispatch them.
+            for call in state.pending:
+                tracer.event(
+                    "tool.call",
+                    step=state.step,
+                    tool_call_id=call.id,
+                    name=call.name,
+                    arguments=call.arguments,
+                )
+                tracer.event(
+                    "tool.result",
+                    step=state.step,
+                    tool_call_id=call.id,
+                    name=call.name,
+                    duration_ms=0,
+                    content="ERROR: resumed before result; outcome unknown, not re-run",
+                    is_error=True,
+                )
+                state.messages.append(
+                    Message(
+                        role="tool",
+                        content="ERROR: resumed before result; outcome unknown, not re-run",
+                        tool_call_id=call.id,
+                    )
+                )
+            state.pending = []
+            state.status = "running"
+            checkpointer.save(state)
+        else:
+            run_id = run_id or uuid.uuid4().hex[:12]
+            state = RunState.new(run_id=run_id, state=self.state, task=task)
+            tracer = TraceRecorder(run_id, self.trace_dir)
+            runtime = self.state.runtime()
+            tracer.event(
+                "run.start",
+                task=task,
+                model=getattr(self.model, "name", "unknown"),
+                tools=self.tools.names(),
+                max_steps=self.state.max_steps,
+                state={
+                    "name": self.state.name,
+                    "version": self.state.version,
+                    "hash": self.state.hash,
+                    "path": str(self.state.path),
+                },
+                runtime=runtime,
+            )
 
         try:
-            for step in range(1, self.state.max_steps + 1):
+            if resumed:
+                tracer.event(
+                    "model.request",
+                    step=state.step,
+                    message_count=len(state.messages),
+                    resume=True,
+                )
+            for step in range(state.step + 1, self.state.max_steps + 1):
+                state.status = "running"
+                state.step = step
                 specs = self.tools.specs() or None
-                tracer.event("model.request", step=step, message_count=len(messages))
+                tracer.event("model.request", step=step, message_count=len(state.messages))
                 started = time.perf_counter()
-                response = await self.model.complete(messages, tools=specs)
-                usage.add(response.usage)
+                response = await self.model.complete(state.messages, tools=specs)
+                state.usage.add(response.usage)
                 tracer.event(
                     "model.response",
                     step=step,
@@ -244,31 +413,33 @@ class Agent:
                     usage=response.usage.to_dict(),
                     finish_reason=response.finish_reason,
                 )
-
-                messages.append(
+                state.messages.append(
                     Message(
                         role="assistant",
                         content=response.content,
                         tool_calls=response.tool_calls,
                     )
                 )
+
                 if not response.tool_calls:
                     after = self._state_hash()
                     status = "ok" if after == self.state.hash else "drift"
+                    state.status = status
+                    checkpointer.save(state)
                     tracer.event(
                         "run.end",
                         status=status,
                         steps=step,
                         final=response.content,
-                        usage=usage.to_dict(),
+                        usage=state.usage.to_dict(),
                         state_hash=after,
                     )
                     return RunResult(
                         run_id=run_id,
                         final=response.content,
-                        messages=messages,
+                        messages=state.messages,
                         steps=step,
-                        usage=usage,
+                        usage=state.usage,
                         trace_path=tracer.path,
                         status=status,
                         state_version=self.state.version,
@@ -276,6 +447,8 @@ class Agent:
                     )
 
                 for call in response.tool_calls:
+                    state.status = "waiting_tool"
+                    state.pending.append(call)
                     tracer.event(
                         "tool.call",
                         step=step,
@@ -283,8 +456,10 @@ class Agent:
                         name=call.name,
                         arguments=call.arguments,
                     )
+                    checkpointer.save(state)
                     started = time.perf_counter()
                     result = await self.tools.dispatch(call)
+                    state.pending.remove(call)
                     tracer.event(
                         "tool.result",
                         step=step,
@@ -294,23 +469,27 @@ class Agent:
                         content=result.content,
                         is_error=result.content.startswith("ERROR:"),
                     )
-                    messages.append(result)
+                    state.messages.append(result)
+                    checkpointer.save(state)
 
+            state.status = "max_steps"
+            checkpointer.save(state)
             tracer.event(
                 "run.end",
                 status="max_steps",
                 steps=self.state.max_steps,
-                usage=usage.to_dict(),
+                usage=state.usage.to_dict(),
                 state_hash=self._state_hash(),
             )
             raise MaxStepsExceeded(f"agent exceeded {self.state.max_steps} steps")
         except MaxStepsExceeded:
             raise
         except Exception as exc:
+            state.status = "error"
             tracer.event(
                 "run.end",
                 status="error",
-                step=step,
+                step=state.step,
                 error=f"{type(exc).__name__}: {exc}",
                 state_hash=self._state_hash(),
             )

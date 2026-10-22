@@ -28,11 +28,17 @@ def main(argv: list[str] | None = None) -> int:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     run = subcommands.add_parser("run", help="run one task")
-    run.add_argument("task")
+    run.add_argument("task", nargs="?", default="")
     run.add_argument(
         "--agent",
         default=DEFAULT_AGENT,
         help=f"agent YAML path (default: {DEFAULT_AGENT})",
+    )
+    run.add_argument(
+        "--resume",
+        default=None,
+        metavar="RUN_ID",
+        help="resume a run from its checkpoint (the task argument is ignored)",
     )
     run.add_argument("--mock", action="store_true", help="use the offline deterministic model")
     run.add_argument("--model", default=None)
@@ -65,10 +71,19 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    if not args.task and not args.resume:
+        print("error: provide a task or --resume RUN_ID", file=sys.stderr)
+        await model.aclose()
+        return 2
+
     agent = Agent(model=model, tools=tools, state=state, trace_dir=args.traces)
     try:
-        result = await agent.run(args.task)
-    except MaxStepsExceeded as exc:
+        result = await agent.run(
+            args.task,
+            run_id=args.resume,
+            resume=bool(args.resume),
+        )
+    except (MaxStepsExceeded, RuntimeError, AgentConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     finally:

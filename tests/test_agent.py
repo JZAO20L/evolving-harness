@@ -7,10 +7,12 @@ from evolving_harness.agent import (
     Agent,
     AgentConfigError,
     AgentState,
+    Checkpointer,
+    RunState,
     build_tools,
 )
-from evolving_harness.core.message import ToolCall
-from evolving_harness.models.base import ModelResponse
+from evolving_harness.core.message import Message, ToolCall
+from evolving_harness.models.base import ModelResponse, Usage
 from evolving_harness.models.mock import MockChatModel
 
 
@@ -122,3 +124,98 @@ async def test_state_drift_invalidates_the_run(make_agent, tmp_path):
     events = [json.loads(line) for line in result.trace_path.read_text().splitlines()]
     assert events[-1]["data"]["status"] == "drift"
     assert events[-1]["data"]["state_hash"] != state.hash
+
+
+def test_run_state_snapshot_roundtrips(make_agent):
+    state = AgentState.load(make_agent())
+    rs = RunState.new(run_id="abc", state=state, task="hi")
+
+    back = RunState.from_dict(rs.snapshot())
+
+    assert back.run_id == "abc"
+    assert back.agent_hash == state.hash
+    assert back.task == "hi"
+    assert back.step == 0
+    assert [m.role for m in back.messages] == ["system", "user"]
+    assert back.messages[1].content == "hi"
+    assert back.usage.total_tokens == 0
+
+
+def test_checkpointer_saves_and_loads(make_agent, tmp_path):
+    state = AgentState.load(make_agent())
+    rs = RunState.new(run_id="ck", state=state, task="t")
+
+    cp = Checkpointer(tmp_path / "traces")
+    cp.save(rs)
+    loaded = cp.load("ck")
+
+    assert loaded is not None
+    assert loaded.run_id == "ck"
+    assert loaded.task == "t"
+    assert loaded.agent_name == "test"
+    assert loaded.agent_hash == state.hash
+
+
+async def test_resume_continues_from_checkpoint(make_agent, tmp_path):
+    path = make_agent()
+    state = AgentState.load(path)
+    call = ToolCall(id="c1", name="list_dir", arguments={})
+    rs = RunState.new(run_id="r1", state=state, task="continue")
+    rs.step = 1
+    rs.messages = [
+        Message(role="system", content=state.render_system_prompt()),
+        Message(role="user", content="continue"),
+        Message(role="assistant", content="", tool_calls=[call]),
+        Message(role="tool", content="ok", tool_call_id="c1"),
+    ]
+    Checkpointer(tmp_path / "traces").save(rs)
+
+    agent = Agent(
+        model=MockChatModel([ModelResponse(content="final", usage=Usage(5, 1))]),
+        tools=build_tools(state, tmp_path / "ws"),
+        state=state,
+        trace_dir=tmp_path / "traces",
+    )
+    result = await agent.run("continue", run_id="r1", resume=True)
+
+    assert result.status == "ok"
+    assert result.steps == 2
+    assert len(agent.model.calls) == 1  # resumed loop does not redo step 1
+    events = [json.loads(line) for line in result.trace_path.read_text().splitlines()]
+    kinds = [event["kind"] for event in events]
+    assert "run.recover" in kinds
+    recover = events[kinds.index("run.recover")]["data"]
+    assert recover["from_step"] == 1
+    assert events[-1]["kind"] == "run.end"
+    assert events[-1]["data"]["status"] == "ok"
+
+
+async def test_resume_marks_pending_call_unknown_not_rerun(make_agent, tmp_path):
+    path = make_agent()
+    state = AgentState.load(path)
+    call = ToolCall(
+        id="c1", name="write_file", arguments={"path": "x.txt", "content": "boom"}
+    )
+    rs = RunState.new(run_id="r2", state=state, task="pend")
+    rs.step = 1
+    rs.messages = [
+        Message(role="system", content=state.render_system_prompt()),
+        Message(role="user", content="pend"),
+        Message(role="assistant", content="", tool_calls=[call]),
+    ]
+    rs.pending = [call]
+    Checkpointer(tmp_path / "traces").save(rs)
+
+    agent = Agent(
+        model=MockChatModel([ModelResponse(content="final")]),
+        tools=build_tools(state, tmp_path / "ws"),
+        state=state,
+        trace_dir=tmp_path / "traces",
+    )
+    result = await agent.run("pend", run_id="r2", resume=True)
+
+    assert result.status == "ok"
+    assert not (tmp_path / "ws" / "x.txt").exists()  # tool was NOT re-dispatched
+    assert any(
+        "outcome unknown" in msg.content for msg in result.messages
+    )
