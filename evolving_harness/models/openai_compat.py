@@ -21,6 +21,7 @@ class OpenAIChatModel(ChatModel):
         base_url: str,
         api_key: str = "",
         temperature: float = 0.2,
+        max_tokens: int | None = None,
         timeout: float = 120.0,
         max_retries: int = 2,
     ) -> None:
@@ -30,6 +31,7 @@ class OpenAIChatModel(ChatModel):
             raise ValueError("base_url is required")
         self.name = model
         self.temperature = temperature
+        self.max_tokens = max_tokens
         self.max_retries = max_retries
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -46,6 +48,8 @@ class OpenAIChatModel(ChatModel):
             "messages": [message.to_openai() for message in messages],
             "temperature": self.temperature,
         }
+        if self.max_tokens:
+            payload["max_tokens"] = self.max_tokens
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

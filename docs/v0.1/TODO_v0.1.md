@@ -19,6 +19,11 @@
 
 ## 1. M1（进行中）
 
+- [x] **T1.0** Agent state：一个 YAML + 一个 Python（2026-10-21）
+  - 内容：`agents/<name>/agent.yaml` 存 prompt / guidance / skills / tools / limits；`agent.py` 负责校验、渲染、循环；`load_skill` 按需加载 skill 正文
+  - 验收：YAML 字段校验；`run.start` 记录 `state.version/hash/runtime`；run 期间改 YAML → `status=drift`；无技能时自动省略 `load_skill`
+  - 证据：`tests/test_agent.py`（18 passed）；mock run trace `state.hash=76ef3bde…`
+
 - [ ] **T1.1** 上下文预算与 token 估算
   - 内容：每步估算 messages token；`max_context_tokens` 可配置；超阈值抛/触发压缩
   - 验收：构造超长工具结果时不触发模型 4xx；trace 记录估算值
@@ -50,6 +55,8 @@
 2. T1.1 → T1.2（压缩依赖估算）
 3. T1.3
 4. T1.4
+
+T1.0 已完成，作为 M1 的前置：后续压缩、记忆、subagent 都继承同一 `AgentState` 与 runtime。
 
 ## 3. 阻塞项
 

@@ -1,1 +1,1 @@
-"""Agent loop, messages, context and memory."""
+"""Message and tool-call protocol shared by the agent, models and tools."""

@@ -1,0 +1,43 @@
+# Agent definition: static state, loaded fresh at every run.
+#
+# Python (evolving_harness/agent.py) is the frozen runtime.
+# This file is the mutable state. During RSI only the blocks marked
+# "mutable" may change; everything else is pinned for the experiment.
+version: 1
+name: default
+
+# Frozen runtime. Environment references keep secrets out of state.
+model:
+  id: ${EH_MODEL}
+  base_url: ${EH_BASE_URL}
+  temperature: 0.2
+  max_tokens: 2048
+
+limits:
+  max_steps: 20
+
+prompt:
+  # Frozen: the harness contract.
+  system: |
+    You are an agent running inside a harness.
+    - Act only through the provided tools; all paths are relative to the workspace.
+    - Take one step at a time and treat tool results as evidence.
+    - When the task is done, reply with the final answer and no tool calls.
+
+  # Mutable by RSI.
+  guidance: |
+    - Inspect the workspace before writing.
+    - After writing, re-read the result and compare it with the task.
+
+# Frozen tool surface. load_skill is added automatically when skills exist.
+tools:
+  enabled: [read_file, write_file, list_dir]
+
+# Mutable by RSI. Bodies are loaded on demand through load_skill.
+skills:
+  - name: inspect-first
+    description: Read the workspace before making changes.
+    instructions: |
+      1. List the workspace.
+      2. Read every file you plan to modify.
+      3. Then make the smallest change that satisfies the task.

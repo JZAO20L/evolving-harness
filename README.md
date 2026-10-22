@@ -13,7 +13,8 @@ on a public endpoint, not just run on a laptop.
 
 ## Status
 
-M0 — agent loop, model adapters, filesystem tools, JSONL traces, CLI.
+M0 — YAML-defined agent state, agent loop, model adapters, filesystem tools, JSONL
+traces, CLI.
 
 ## Docs
 
@@ -33,17 +34,25 @@ uv run eh run "say hello" --mock
 
 # against any OpenAI-compatible endpoint (vLLM, DeepSeek, Qwen, ...)
 uv run eh run "create notes.txt with a todo list" --workspace ./workspace
+
+# a different agent definition
+uv run eh run "say hello" --mock --agent agents/default/agent.yaml
 ```
 
-A trace is written to `traces/<run_id>.jsonl` for every run.
+Every run loads `agents/default/agent.yaml`, sends `state.version` and `state.hash` to
+the trace, and writes `traces/<run_id>.jsonl`.
 
 ## Design rules
 
-- **nano**: core stays under ~4k lines; one dependency direction; no hidden magic.
+- **nano**: agent = one YAML + one Python. The YAML is versioned static state (prompt,
+  guidance, skills, enabled tools); `agent.py` is the dynamic loop. Plumbing stays in
+  small modules; the agent itself stays readable in one sitting. New concerns start as
+  one file; a directory appears only when it holds multiple real files.
 - **production-grade**: auth, rate limits, timeouts, retries, idempotency, restart-safe
   runs, sandboxed execution, metrics. Not multi-tenant RBAC or billing.
-- **RSI**: evolve the skills layer first. Promotions require a validation gate and a
-  rollback path; no unreviewed self-modification.
+- **RSI**: `rsi.py` is the outer loop. It measures a frozen agent, edits only the YAML,
+  and keeps a change only if the validation gate accepts it. Python is never rewritten
+  by the optimizer.
 
 Tool boundaries are declared, not negotiated at runtime:
 
@@ -58,24 +67,30 @@ class ExecTool(Tool):
 ## Layout
 
 ```
+agents/
+  default/agent.yaml   agent state: prompt, guidance, skills, tools, limits
+benchmarks/            frozen cases: statement (public) + checks/rubric (private)
 evolving_harness/
-  core/       loop, messages, context, memory
-  models/     OpenAI-compatible adapter, mock model
-  tools/      registry, filesystem tools
-  tracing/    unified run trace (JSONL)
-  sandbox/    resident container pool (M3)
-  skills/     skill cards, registry, retrieval, evolution (M4)
-  rsi/        rollout, verifiers, promotion gate (M5-M6)
-  serving/    FastAPI control plane, SSE, auth (M2)
-  store/      runs, traces, skills, evals (M2)
-  ui/         Gradio (M7)
+  agent.py      state loader, prompt rendering, agent loop
+  cli.py        eh run; thin wrapper over agent.py
+  core/         message and tool-call protocol
+  models/       OpenAI-compatible adapter, mock model
+  tools/        registry, filesystem tools
+  tracing/      unified run trace (JSONL)
+
+  # later: one file per concern, split only when it stops being readable
+  rsi.py        outer loop: evaluate, propose, gate, snapshot, rollback (M5-M6)
+  sandbox.py    resident container pool (M3)
+  serving.py    FastAPI control plane, SSE, auth (M2)
+  store.py      runs, traces, evals (M2)
+  ui.py         Gradio (M7)
 ```
 
 ## Roadmap
 
 M0 loop and traces · M1 memory and context compaction · M2 serving and persistence ·
-M3 sandbox pool · M4 skills registry · M5 tiered verifiers · M6 evolution gate ·
-M7 public deployment · M8 evaluation report.
+M3 sandbox pool · M4 YAML skills and on-demand loading · M5 tiered verifiers ·
+M6 evolution gate · M7 public deployment · M8 evaluation report.
 
 ## License
 

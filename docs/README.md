@@ -120,7 +120,7 @@ planning ──> active ──> frozen
 |---|---|---|
 | v0.1 | Agent 内核 | M0 循环 / 模型适配 / trace，M1 记忆 / 上下文 |
 | v0.2 | 服务化与沙箱 | M2 FastAPI / 持久化，M3 容器池 |
-| v0.3 | Skills 与 RSI | M4 注册与检索，M5 三档 verifier，M6 演化门禁 |
+| v0.3 | Skills 与 RSI | M4 YAML skills + 按需加载，M5 三档 verifier，M6 演化门禁 |
 | v0.4 | 公网与评测 | M7 部署，M8 压测与评测报告 |
 
 版本号只在**能力边界变化**时递增，不为一次重构或一个 bugfix 开新版。

@@ -2,30 +2,28 @@ import json
 
 import pytest
 
-from evolving_harness.core.loop import AgentLoop, MaxStepsExceeded
+from evolving_harness.agent import Agent, AgentState, MaxStepsExceeded, build_tools
 from evolving_harness.core.message import ToolCall
 from evolving_harness.models.base import ModelResponse, Usage
 from evolving_harness.models.mock import MockChatModel
-from evolving_harness.tools.base import ToolRegistry
-from evolving_harness.tools.fs import fs_tools
 
 
-def build_loop(tmp_path, responses, max_steps=5):
-    workspace = tmp_path / "ws"
-    return AgentLoop(
+def build_agent(make_agent, tmp_path, responses, max_steps=5):
+    state = AgentState.load(make_agent(limits={"max_steps": max_steps}))
+    return Agent(
         model=MockChatModel(responses),
-        tools=ToolRegistry(fs_tools(workspace)),
-        system_prompt="be brief",
-        max_steps=max_steps,
+        tools=build_tools(state, tmp_path / "ws"),
+        state=state,
         trace_dir=tmp_path / "traces",
     )
 
 
-async def test_loop_executes_tool_then_finishes(tmp_path):
+async def test_loop_executes_tool_then_finishes(make_agent, tmp_path):
     call = ToolCall(
         id="c1", name="write_file", arguments={"path": "notes.txt", "content": "hello"}
     )
-    loop = build_loop(
+    agent = build_agent(
+        make_agent,
         tmp_path,
         [
             ModelResponse(tool_calls=[call], usage=Usage(10, 2)),
@@ -33,7 +31,7 @@ async def test_loop_executes_tool_then_finishes(tmp_path):
         ],
     )
 
-    result = await loop.run("write notes.txt")
+    result = await agent.run("write notes.txt")
 
     assert result.final == "done"
     assert result.steps == 2
@@ -52,14 +50,15 @@ async def test_loop_executes_tool_then_finishes(tmp_path):
     assert tool_result["data"]["content"].startswith("wrote 5 bytes")
 
 
-async def test_loop_reports_tool_errors_as_data(tmp_path):
+async def test_loop_reports_tool_errors_as_data(make_agent, tmp_path):
     call = ToolCall(id="c1", name="read_file", arguments={"path": "missing.txt"})
-    loop = build_loop(
+    agent = build_agent(
+        make_agent,
         tmp_path,
         [ModelResponse(tool_calls=[call]), ModelResponse(content="gave up")],
     )
 
-    result = await loop.run("read a missing file")
+    result = await agent.run("read a missing file")
 
     assert result.final == "gave up"
     events = [json.loads(line) for line in result.trace_path.read_text().splitlines()]
@@ -67,14 +66,17 @@ async def test_loop_reports_tool_errors_as_data(tmp_path):
     assert tool_result["data"]["is_error"] is True
 
 
-async def test_loop_stops_at_max_steps(tmp_path):
+async def test_loop_stops_at_max_steps(make_agent, tmp_path):
     call = ToolCall(id="c1", name="list_dir", arguments={})
-    loop = build_loop(
-        tmp_path, [ModelResponse(tool_calls=[call]) for _ in range(3)], max_steps=3
+    agent = build_agent(
+        make_agent,
+        tmp_path,
+        [ModelResponse(tool_calls=[call]) for _ in range(3)],
+        max_steps=3,
     )
 
     with pytest.raises(MaxStepsExceeded):
-        await loop.run("loop forever")
+        await agent.run("loop forever")
 
     trace_path = next((tmp_path / "traces").glob("*.jsonl"))
     events = [json.loads(line) for line in trace_path.read_text().splitlines()]
