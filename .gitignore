@@ -10,3 +10,6 @@ build/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# dev-aid docs, maintained locally, not published
+docs/

@@ -13,15 +13,15 @@ on a public endpoint, not just run on a laptop.
 
 ## Status
 
-M0 — YAML-defined agent state, agent loop, model adapters, filesystem tools, JSONL
-traces, CLI.
+M0/M0.5 complete — YAML-defined agent state, loop, adapters, filesystem tools,
+JSONL traces, CLI. Working on M1: run state, context budget, compaction, memory,
+subagent.
 
 ## Docs
 
-- [docs/README.md](docs/README.md) — documentation system: layers, doc types, update rules (Chinese)
-- [docs/v0.1/README.md](docs/v0.1/README.md) — current version: scope, milestones, index
-
-The root README is the stable entry point; working docs live under `docs/` in Chinese.
+Working docs live under `docs/` (Chinese) and are maintained locally as development
+aids; they are not published in this repo. The root README is the stable public entry
+point.
 
 ## Quickstart
 
@@ -79,18 +79,18 @@ evolving_harness/
   tracing/      unified run trace (JSONL)
 
   # later: one file per concern, split only when it stops being readable
-  rsi.py        outer loop: evaluate, propose, gate, snapshot, rollback (M5-M6)
-  sandbox.py    resident container pool (M3)
-  serving.py    FastAPI control plane, SSE, auth (M2)
-  store.py      runs, traces, evals (M2)
-  ui.py         Gradio (M7)
+  rsi.py        outer loop: rollout, tiered verifier, gate, version registry (M2-M3)
+  serving.py    single-file FastAPI + SQLite + SSE + run state (M4)
+  sandbox.py    resident container pool (M5)
+  ui.py         Gradio (v0.4, M6)
 ```
 
 ## Roadmap
 
-M0 loop and traces · M1 memory and context compaction · M2 serving and persistence ·
-M3 sandbox pool · M4 YAML skills and on-demand loading · M5 tiered verifiers ·
-M6 evolution gate · M7 public deployment · M8 evaluation report.
+M0 loop and traces · M1 complete agent (run state, context, memory, subagent) ·
+M2 RSI benchmark and tiered verifiers · M3 evolution gate and version registry ·
+M4 single-file backend serving with persistent state · M5 sandbox pool ·
+M6 web frontend · M7 public deploy and evaluation report.
 
 ## License
 
