@@ -41,6 +41,10 @@ SKILL_ISOLATION = ToolIsolation(
 MEMORY_ISOLATION = ToolIsolation(
     level="read", network="none", fs_scope="workspace_writable", resources={}
 )
+SUBAGENT_TOOL = "subagent"
+SUBAGENT_ISOLATION = ToolIsolation(
+    level="spawn", network="none", fs_scope="workspace_writable", resources={}
+)
 
 
 class AgentConfigError(ValueError):
@@ -502,12 +506,19 @@ class Agent:
         state: State,
         trace_dir: str | Path = "traces",
         workspace: str | Path = "workspace",
+        depth: int = 0,
     ) -> None:
         self.model = model
         self.tools = tools
         self.state = state
         self.trace_dir = trace_dir
+        self.workspace = Path(workspace)
+        self.depth = depth
         self.memory = MemoryStore(workspace, state.memory)
+        self._tracer: TraceRecorder | None = None
+        self._run_state: State | None = None
+        if self.tools.get(SUBAGENT_TOOL) is None:
+            self.tools.register(_subagent_tool(self))
 
     async def run(
         self,
@@ -515,6 +526,7 @@ class Agent:
         run_id: str | None = None,
         *,
         resume: bool = False,
+        parent_run_id: str | None = None,
     ) -> RunResult:
         checkpointer = Checkpointer(self.trace_dir)
         tracer: TraceRecorder
@@ -565,7 +577,9 @@ class Agent:
             state.status = "running"
             checkpointer.save(state)
         else:
-            state = self.state.begin_run(task=task, run_id=run_id)
+            state = self.state.begin_run(
+                task=task, run_id=run_id, parent_run_id=parent_run_id
+            )
             run_id = state.run_id
             tracer = TraceRecorder(run_id, self.trace_dir)
             runtime = self.state.runtime()
@@ -581,6 +595,7 @@ class Agent:
                     "hash": self.state.hash,
                     "path": str(self.state.path),
                 },
+                parent_run_id=state.parent_run_id,
                 runtime=runtime,
             )
             if self.memory.enabled:
@@ -594,6 +609,8 @@ class Agent:
                     )
                 self.memory.record("run.start", run_id=run_id, task=task)
 
+        self._tracer = tracer
+        self._run_state = state
         try:
             if resumed:
                 tracer.event(
@@ -729,7 +746,64 @@ class Agent:
             )
             raise
         finally:
+            self._tracer = None
+            self._run_state = None
             tracer.close()
+
+    async def _run_subagent(self, task: str, max_steps: int | None = None) -> str:
+        """Run one child Agent in a fresh context; its final answer is tool data."""
+        if self.depth >= 2:
+            return "ERROR: subagent depth limit reached"
+        if self._tracer is None or self._run_state is None:
+            return "ERROR: subagent requires an active run"
+        task = str(task).strip()
+        if not task:
+            raise ValueError("subagent task must not be empty")
+        budget = max(1, (self.state.max_steps - self._run_state.step) // 2)
+        if max_steps is not None:
+            if (
+                isinstance(max_steps, bool)
+                or not isinstance(max_steps, int)
+                or max_steps < 1
+            ):
+                raise ValueError("max_steps must be a positive integer")
+            budget = min(budget, max_steps)
+
+        child_state = replace(self.state, max_steps=budget)
+        child = Agent(
+            model=self.model,
+            tools=build_tools(child_state, self.workspace),
+            state=child_state,
+            trace_dir=self.trace_dir,
+            workspace=self.workspace,
+            depth=self.depth + 1,
+        )
+        child_run_id = uuid.uuid4().hex[:12]
+        self._tracer.event(
+            "subagent.start",
+            child_run_id=child_run_id,
+            task=task,
+            max_steps=budget,
+            depth=self.depth + 1,
+        )
+        try:
+            result = await child.run(
+                task, run_id=child_run_id, parent_run_id=self._run_state.run_id
+            )
+        except Exception as exc:  # noqa: BLE001 - child failures are tool data
+            message = f"{type(exc).__name__}: {exc}"
+            self._tracer.event(
+                "subagent.end", child_run_id=child_run_id, status="error", error=message
+            )
+            return f"ERROR: subagent failed: {message}"
+        self._tracer.event(
+            "subagent.end",
+            child_run_id=child_run_id,
+            status=result.status,
+            steps=result.steps,
+            usage=result.usage.to_dict(),
+        )
+        return result.final
 
     async def _summarize_memory(
         self, state: State, step: int, tracer: TraceRecorder
@@ -1111,6 +1185,32 @@ def _list_skills_tool(state: State) -> Tool:
         },
         handler=list_skills,
         isolation=SKILL_ISOLATION,
+    )
+
+
+def _subagent_tool(agent: Agent) -> Tool:
+    async def subagent(task: str, max_steps: int | None = None) -> str:
+        return await agent._run_subagent(task, max_steps)
+
+    return Tool(
+        name=SUBAGENT_TOOL,
+        description=(
+            "Run one focused sub-task in a fresh context and return its final answer. "
+            "The child gets at most half of the parent's remaining steps."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Self-contained sub-task."},
+                "max_steps": {
+                    "type": "integer",
+                    "description": "Optional lower step cap for the child.",
+                },
+            },
+            "required": ["task"],
+        },
+        handler=subagent,
+        isolation=SUBAGENT_ISOLATION,
     )
 
 
