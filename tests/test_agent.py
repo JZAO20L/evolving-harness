@@ -238,3 +238,73 @@ async def test_resume_marks_pending_call_unknown_not_rerun(make_agent, tmp_path)
     assert any(
         "outcome unknown" in msg.content for msg in result.messages
     )
+
+
+def test_skill_catalog_is_capped_sorted_and_summarized(make_agent):
+    skills = [
+        {
+            "name": f"skill-{index}",
+            "description": f"desc {index}",
+            "instructions": "body",
+            "summary": f"hint {index}",
+            "priority": index % 5,
+        }
+        for index in range(20)
+    ]
+    state = State.load(make_agent(skills=skills, limits={"skill_catalog_limit": 5}))
+
+    prompt = state.render_system_prompt()
+    lines = [line for line in prompt.splitlines() if line.startswith("- skill-")]
+
+    assert len(lines) == 5
+    assert "+15 more" in prompt
+    assert "hint 19" in prompt
+    priorities = [int(line.rsplit("[p", 1)[1].split("]", 1)[0]) for line in lines]
+    assert priorities == sorted(priorities, reverse=True)
+
+
+async def test_list_skills_paginates(make_agent, tmp_path):
+    skills = [
+        {
+            "name": f"skill-{index}",
+            "description": f"desc {index}",
+            "instructions": "body",
+            "priority": index % 5,
+        }
+        for index in range(20)
+    ]
+    state = State.load(make_agent(skills=skills))
+    registry = build_tools(state, tmp_path / "ws")
+
+    result = await registry.dispatch(
+        ToolCall(
+            id="c1",
+            name="list_skills",
+            arguments={"page": 1, "page_size": 5},
+        )
+    )
+
+    assert "skills 6-10 of 20" in result.content
+    assert result.content.count("- skill-") == 5
+    assert "[p" in result.content
+
+
+def test_skill_priority_is_validated(make_agent):
+    with pytest.raises(AgentConfigError):
+        State.load(
+            make_agent(
+                skills=[
+                    {
+                        "name": "broken",
+                        "description": "d",
+                        "instructions": "i",
+                        "priority": "high",
+                    }
+                ]
+            )
+        )
+
+
+def test_auto_skill_tools_cannot_be_declared(make_agent):
+    with pytest.raises(AgentConfigError):
+        State.load(make_agent(tools={"enabled": ["list_skills"]}))

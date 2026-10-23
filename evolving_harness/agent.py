@@ -29,7 +29,9 @@ from .tracing.recorder import TraceRecorder
 
 DEFAULT_TOOLS = ("read_file", "write_file", "list_dir")
 SKILL_TOOL = "load_skill"
+LIST_SKILLS_TOOL = "list_skills"
 SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+DEFAULT_SKILL_CATALOG_LIMIT = 16
 DEFAULT_MAX_CONTEXT_TOKENS = 32000
 DEFAULT_KEEP_RECENT_ROUNDS = 6
 TOOL_HEAD_TAIL_CHARS = 500
@@ -54,6 +56,8 @@ class Skill:
     name: str
     description: str
     instructions: str
+    summary: str = ""
+    priority: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +102,7 @@ class State:
     max_steps: int = 0
     max_context_tokens: int = 0
     keep_recent_rounds: int = 0
+    skill_catalog_limit: int = 0
     tool_names: tuple[str, ...] = ()
     model_config: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -152,8 +157,9 @@ class State:
             raise AgentConfigError("tools.enabled must be a non-empty list")
         if not all(isinstance(item, str) for item in enabled):
             raise AgentConfigError("tools.enabled must contain strings")
-        if SKILL_TOOL in enabled:
-            raise AgentConfigError(f"{SKILL_TOOL} is added automatically; do not list it")
+        for auto in (SKILL_TOOL, LIST_SKILLS_TOOL):
+            if auto in enabled:
+                raise AgentConfigError(f"{auto} is added automatically; do not list it")
         if len(set(enabled)) != len(enabled):
             raise AgentConfigError("tools.enabled contains duplicates")
 
@@ -180,6 +186,14 @@ class State:
         ):
             raise AgentConfigError("limits.keep_recent_rounds must be a positive integer")
 
+        skill_catalog_limit = limits.get("skill_catalog_limit", DEFAULT_SKILL_CATALOG_LIMIT)
+        if (
+            isinstance(skill_catalog_limit, bool)
+            or not isinstance(skill_catalog_limit, int)
+            or skill_catalog_limit < 1
+        ):
+            raise AgentConfigError("limits.skill_catalog_limit must be a positive integer")
+
         model_config = _mapping(raw, "model")
 
         snapshot = json.loads(json.dumps(raw, default=str))
@@ -200,6 +214,7 @@ class State:
             max_steps=max_steps,
             max_context_tokens=max_context_tokens,
             keep_recent_rounds=keep_recent_rounds,
+            skill_catalog_limit=skill_catalog_limit,
             tool_names=tuple(enabled),
             model_config=model_config,
             raw=snapshot,
@@ -291,11 +306,22 @@ class State:
             )
             parts.append("\n".join(lines))
         if self.skills:
+            ordered = _ordered_skills(self.skills)
+            shown = ordered[: self.skill_catalog_limit]
             lines = [
                 "## Skills",
                 f"Load full instructions with {SKILL_TOOL}(name) before using a skill.",
             ]
-            lines.extend(f"- {item.name}: {item.description}" for item in self.skills)
+            for item in shown:
+                line = f"- {item.name}: {item.description} [p{item.priority}]"
+                if item.summary:
+                    line += f" — {item.summary}"
+                lines.append(line)
+            hidden = len(ordered) - len(shown)
+            if hidden:
+                lines.append(
+                    f"- +{hidden} more; call {LIST_SKILLS_TOOL}(page, page_size) to browse."
+                )
             parts.append("\n".join(lines))
         return "\n\n".join(parts)
 
@@ -667,6 +693,7 @@ class Agent:
                     )
                     state.messages.append(result)
                     self._note_tool_outcome(state, call, result.content, step, tracer)
+                    self._trace_skill_call(call, result.content, step, tracer)
                     checkpointer.save(state)
 
             state.status = "max_steps"
@@ -868,6 +895,21 @@ class Agent:
         )
         return current, True
 
+    def _trace_skill_call(
+        self, call: ToolCall, content: str, step: int, tracer: TraceRecorder
+    ) -> None:
+        if content.startswith("ERROR:"):
+            return
+        if call.name == SKILL_TOOL:
+            tracer.event("skill.load", step=step, name=call.arguments.get("name"))
+        elif call.name == LIST_SKILLS_TOOL:
+            tracer.event(
+                "list_skills",
+                step=step,
+                page=call.arguments.get("page", 0),
+                page_size=call.arguments.get("page_size", 10),
+            )
+
     def _tool_isolation(self, name: str) -> dict[str, Any] | None:
         item = self.tools.get(name)
         return item.isolation.to_dict() if item and item.isolation else None
@@ -900,6 +942,7 @@ def build_tools(state: State, workspace: str | Path) -> ToolRegistry:
 
     if state.skills:
         selected.append(_skill_tool(state))
+        selected.append(_list_skills_tool(state))
     if state.memory.enabled:
         selected.append(_memory_tool(MemoryStore(root, state.memory)))
     return ToolRegistry(selected)
@@ -983,9 +1026,27 @@ def _parse_skills(items: Any) -> list[Skill]:
         instructions = item.get("instructions")
         if not isinstance(instructions, str) or not instructions.strip():
             raise AgentConfigError(f"skills[{index}].instructions must be a non-empty string")
+        summary = item.get("summary", "")
+        if not isinstance(summary, str):
+            raise AgentConfigError(f"skills[{index}].summary must be a string")
+        priority = item.get("priority", 1)
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            raise AgentConfigError(f"skills[{index}].priority must be an integer")
         seen.add(name)
-        skills.append(Skill(name=name, description=description, instructions=instructions))
+        skills.append(
+            Skill(
+                name=name,
+                description=description,
+                instructions=instructions,
+                summary=summary.strip(),
+                priority=priority,
+            )
+        )
     return skills
+
+
+def _ordered_skills(skills: tuple[Skill, ...]) -> list[Skill]:
+    return sorted(skills, key=lambda item: (-item.priority, item.name))
 
 
 def _skill_tool(state: State) -> Tool:
@@ -1007,6 +1068,48 @@ def _skill_tool(state: State) -> Tool:
             "required": ["name"],
         },
         handler=load_skill,
+        isolation=SKILL_ISOLATION,
+    )
+
+
+def _list_skills_tool(state: State) -> Tool:
+    def list_skills(page: int = 0, page_size: int = 10) -> str:
+        if isinstance(page, bool) or isinstance(page_size, bool):
+            raise TypeError("page and page_size must be integers")
+        page = int(page)
+        page_size = int(page_size)
+        if page < 0:
+            raise ValueError("page must be >= 0")
+        if not 1 <= page_size <= 50:
+            raise ValueError("page_size must be between 1 and 50")
+        ordered = _ordered_skills(state.skills)
+        start = page * page_size
+        window = ordered[start : start + page_size]
+        if not window:
+            return f"no skills on page {page}; total {len(ordered)}"
+        lines = [f"skills {start + 1}-{start + len(window)} of {len(ordered)}"]
+        for item in window:
+            line = f"- {item.name}: {item.description} [p{item.priority}]"
+            if item.summary:
+                line += f" — {item.summary}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    return Tool(
+        name=LIST_SKILLS_TOOL,
+        description="Browse the skill catalog by page, highest priority first.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "page": {"type": "integer", "description": "0-based page number."},
+                "page_size": {
+                    "type": "integer",
+                    "description": "Skills per page, 1..50 (default 10).",
+                },
+            },
+            "required": [],
+        },
+        handler=list_skills,
         isolation=SKILL_ISOLATION,
     )
 

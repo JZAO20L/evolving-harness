@@ -19,6 +19,7 @@ limits:
   # the oldest rounds dropped; the most recent rounds stay verbatim.
   max_context_tokens: 32000
   keep_recent_rounds: 6
+  skill_catalog_limit: 16
 
 prompt:
   # Frozen: the harness contract.
@@ -54,6 +55,8 @@ memory:
 skills:
   - name: inspect-first
     description: Read the workspace before making changes.
+    summary: List and read before editing; re-read after.
+    priority: 2
     instructions: |
       1. List the workspace.
       2. Read every file you plan to modify.
