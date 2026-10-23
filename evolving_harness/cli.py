@@ -76,7 +76,13 @@ async def _run(args: argparse.Namespace) -> int:
         await model.aclose()
         return 2
 
-    agent = Agent(model=model, tools=tools, state=state, trace_dir=args.traces)
+    agent = Agent(
+        model=model,
+        tools=tools,
+        state=state,
+        trace_dir=args.traces,
+        workspace=workspace,
+    )
     try:
         result = await agent.run(
             args.task,

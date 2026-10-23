@@ -48,6 +48,7 @@ goals:
 memory:
   enabled: false
   path: .memory/notes.md
+  max_tokens: 1024        # injection cap; summary first, then most recent notes
 
 # Mutable by RSI. Bodies are loaded on demand through load_skill.
 skills:

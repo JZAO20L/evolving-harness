@@ -60,6 +60,7 @@ class Goal:
 class MemoryPolicy:
     enabled: bool
     path: str
+    max_tokens: int = 1024
 
 
 @dataclass(slots=True)
@@ -84,7 +85,9 @@ class State:
     guidance: str = ""
     skills: tuple[Skill, ...] = ()
     goals: tuple[Goal, ...] = ()
-    memory: MemoryPolicy = field(default_factory=lambda: MemoryPolicy(False, ".memory/notes.md"))
+    memory: MemoryPolicy = field(
+        default_factory=lambda: MemoryPolicy(False, ".memory/notes.md", 1024)
+    )
     max_steps: int = 0
     max_context_tokens: int = 0
     keep_recent_rounds: int = 0
@@ -345,6 +348,104 @@ class Checkpointer:
             return None
 
 
+class MemoryStore:
+    """Layered file memory under the workspace. A no-op when disabled.
+
+    L0 ``raw/`` append-only JSONL event log, one file per run.
+    L1 ``notes.md`` keyed markdown lines (upsert), the durable facts.
+    L2 ``summary.md`` low-frequency model rewrite of L1, preferred at injection.
+    """
+
+    MAX_NOTES_LINES = 200
+
+    def __init__(self, workspace: str | Path, policy: MemoryPolicy) -> None:
+        self.policy = policy
+        self.enabled = policy.enabled
+        self.root = Path(workspace).resolve()
+        notes_path = (self.root / policy.path).resolve()
+        if not notes_path.is_relative_to(self.root):
+            raise AgentConfigError("memory.path escapes the workspace")
+        self.notes_path = notes_path
+        self.summary_path = self.notes_path.parent / "summary.md"
+        self.raw_dir = self.notes_path.parent / "raw"
+
+    def record(self, kind: str, *, run_id: str, **data: Any) -> None:
+        if not self.enabled:
+            return
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        entry = {"ts": round(time.time(), 6), "kind": kind, **data}
+        with (self.raw_dir / f"{run_id}.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+    def remember(self, key: str, note: str) -> None:
+        if not self.enabled:
+            return
+        key = " ".join(str(key).split())
+        note = " ".join(str(note).split())
+        if not key or len(key) > 120:
+            raise ValueError("memory key must be 1-120 characters")
+        if not note:
+            raise ValueError("memory note must not be empty")
+        self.notes_path.parent.mkdir(parents=True, exist_ok=True)
+        prefix = f"- [{key}] "
+        lines = []
+        if self.notes_path.is_file():
+            lines = [
+                line
+                for line in self.notes_path.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.startswith(prefix)
+            ]
+        lines.append(prefix + note)
+        self.notes_path.write_text(
+            "\n".join(lines[-self.MAX_NOTES_LINES:]) + "\n", encoding="utf-8"
+        )
+
+    def notes_text(self) -> str:
+        if not self.enabled or not self.notes_path.is_file():
+            return ""
+        return self.notes_path.read_text(encoding="utf-8")
+
+    def write_summary(self, text: str) -> None:
+        if not self.enabled:
+            return
+        self.notes_path.parent.mkdir(parents=True, exist_ok=True)
+        self.summary_path.write_text(text.strip() + "\n", encoding="utf-8")
+
+    def context(self) -> tuple[str, int]:
+        """L2 summary first, then the most recent L1 notes, capped by max_tokens."""
+        if not self.enabled:
+            return "", 0
+        budget = self.policy.max_tokens
+        used = 0
+        sections: list[str] = []
+
+        summary = ""
+        if self.summary_path.is_file():
+            summary = self.summary_path.read_text(encoding="utf-8").strip()
+        if summary:
+            summary = summary[: max(0, budget * 4 - 20)]
+            text = "### Summary\n" + summary
+            used = _estimate_tokens(text)
+            sections.append(text)
+
+        selected: list[str] = []
+        for line in reversed(self.notes_text().splitlines()):
+            if not line.strip():
+                continue
+            tokens = _estimate_tokens(line)
+            if used + tokens > budget:
+                break
+            selected.append(line)
+            used += tokens
+        if selected:
+            sections.append("### Notes\n" + "\n".join(reversed(selected)))
+
+        if not sections:
+            return "", 0
+        block = "## Memory\n" + "\n\n".join(sections)
+        return block, _estimate_tokens(block)
+
+
 @dataclass(slots=True)
 class RunResult:
     run_id: str
@@ -367,11 +468,13 @@ class Agent:
         tools: ToolRegistry,
         state: State,
         trace_dir: str | Path = "traces",
+        workspace: str | Path = "workspace",
     ) -> None:
         self.model = model
         self.tools = tools
         self.state = state
         self.trace_dir = trace_dir
+        self.memory = MemoryStore(workspace, state.memory)
 
     async def run(
         self,
@@ -397,6 +500,7 @@ class Agent:
             resumed = True
             tracer = TraceRecorder(run_id, self.trace_dir)
             tracer.event("run.recover", from_step=state.step, agent_hash=state.hash)
+            self.memory.record("run.recover", run_id=run_id, from_step=state.step)
             # Tool calls dispatched but never settled before a restart: keep the
             # intent, mark the outcome unknown, and never re-dispatch them.
             for call in state.pending:
@@ -445,6 +549,16 @@ class Agent:
                 },
                 runtime=runtime,
             )
+            if self.memory.enabled:
+                block, memory_tokens = self.memory.context()
+                if block:
+                    state.messages[0].content += "\n\n" + block
+                    tracer.event(
+                        "memory.inject",
+                        tokens=memory_tokens,
+                        max_tokens=self.state.memory.max_tokens,
+                    )
+                self.memory.record("run.start", run_id=run_id, task=task)
 
         try:
             if resumed:
@@ -495,6 +609,9 @@ class Agent:
                     after = self._state_hash()
                     status = "ok" if after == self.state.hash else "drift"
                     state.status = status
+                    if status == "ok":
+                        await self._summarize_memory(state, step, tracer)
+                    self.memory.record("run.end", run_id=run_id, status=status, steps=step)
                     checkpointer.save(state)
                     tracer.event(
                         "run.end",
@@ -540,9 +657,13 @@ class Agent:
                         is_error=result.content.startswith("ERROR:"),
                     )
                     state.messages.append(result)
+                    self._note_tool_outcome(state, call, result.content, step, tracer)
                     checkpointer.save(state)
 
             state.status = "max_steps"
+            self.memory.record(
+                "run.end", run_id=run_id, status="max_steps", steps=self.state.max_steps
+            )
             checkpointer.save(state)
             tracer.event(
                 "run.end",
@@ -556,6 +677,13 @@ class Agent:
             raise
         except Exception as exc:
             state.status = "error"
+            self.memory.record(
+                "run.end",
+                run_id=run_id,
+                status="error",
+                step=state.step,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             tracer.event(
                 "run.end",
                 status="error",
@@ -566,6 +694,91 @@ class Agent:
             raise
         finally:
             tracer.close()
+
+    async def _summarize_memory(
+        self, state: State, step: int, tracer: TraceRecorder
+    ) -> None:
+        """L2: rewrite oversized L1 notes into summary.md at low frequency."""
+        if not self.memory.enabled:
+            return
+        notes = self.memory.notes_text()
+        before = _estimate_tokens(notes)
+        if before <= self.state.memory.max_tokens:
+            return
+        if (
+            self.memory.summary_path.is_file()
+            and self.memory.notes_path.is_file()
+            and self.memory.summary_path.stat().st_mtime
+            >= self.memory.notes_path.stat().st_mtime
+        ):
+            return
+        response = await self.model.complete(
+            [
+                Message(
+                    role="system",
+                    content=(
+                        "Rewrite the project memory notes as durable, deduplicated facts. "
+                        "Drop ephemeral details and prefer short bullets."
+                    ),
+                ),
+                Message(role="user", content=notes),
+            ]
+        )
+        state.usage.add(response.usage)
+        if response.content.strip():
+            self.memory.write_summary(response.content)
+        tracer.event(
+            "memory.summarize",
+            step=step,
+            before_tokens=before,
+            after_tokens=_estimate_tokens(response.content),
+            usage=response.usage.to_dict(),
+        )
+
+    def _note_tool_outcome(
+        self,
+        state: State,
+        call: ToolCall,
+        content: str,
+        step: int,
+        tracer: TraceRecorder,
+    ) -> None:
+        """L0 event log + L1 rule-based notes for writes and tool errors."""
+        if not self.memory.enabled:
+            return
+        is_error = content.startswith("ERROR:")
+        self.memory.record(
+            "tool.call",
+            run_id=state.run_id,
+            step=step,
+            tool_call_id=call.id,
+            name=call.name,
+            arguments=call.arguments,
+        )
+        self.memory.record(
+            "tool.result",
+            run_id=state.run_id,
+            step=step,
+            tool_call_id=call.id,
+            name=call.name,
+            is_error=is_error,
+            content=content[:500],
+        )
+        if call.name == "remember":
+            if not is_error:
+                tracer.event("memory.write", step=step, key=call.arguments.get("key"))
+            return
+        path = call.arguments.get("path") or call.arguments.get("name")
+        if is_error:
+            key = f"error:{call.name}:{path or call.id}"
+            note = f"step {step}: {content[:200]}"
+        elif call.name == "write_file" and path:
+            key = f"write:{path}"
+            note = f"step {step}: wrote {path}"
+        else:
+            return
+        self.memory.remember(key, note)
+        tracer.event("memory.write", step=step, key=key)
 
     def _fit_context(
         self, state: State, step: int, tracer: TraceRecorder
@@ -654,7 +867,14 @@ class Agent:
 
 
 def build_tools(state: State, workspace: str | Path) -> ToolRegistry:
-    available = {item.name: item for item in fs_tools(workspace)}
+    root = Path(workspace)
+    protected: tuple[str, ...] = ()
+    if state.memory.enabled:
+        memory_dir = Path(state.memory.path).parent
+        if str(memory_dir) not in ("", "."):
+            protected = (str(memory_dir),)
+
+    available = {item.name: item for item in fs_tools(root, protected=protected)}
     selected: list[Tool] = []
     for name in state.tool_names:
         item = available.get(name)
@@ -666,6 +886,8 @@ def build_tools(state: State, workspace: str | Path) -> ToolRegistry:
 
     if state.skills:
         selected.append(_skill_tool(state))
+    if state.memory.enabled:
+        selected.append(_memory_tool(MemoryStore(root, state.memory)))
     return ToolRegistry(selected)
 
 
@@ -719,6 +941,7 @@ async def run_agent(
         tools=build_tools(state, workspace),
         state=state,
         trace_dir=trace_dir,
+        workspace=workspace,
     )
     try:
         return await agent.run(task, run_id=run_id)
@@ -773,6 +996,32 @@ def _skill_tool(state: State) -> Tool:
     )
 
 
+def _memory_tool(memory: MemoryStore) -> Tool:
+    def remember(key: str, note: str) -> str:
+        try:
+            memory.remember(key, note)
+        except ValueError as exc:
+            return f"ERROR: {exc}"
+        return f"remembered {key}"
+
+    return Tool(
+        name="remember",
+        description="Store a durable fact for future runs under a stable key.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Stable key; overwrites the previous note for this key.",
+                },
+                "note": {"type": "string", "description": "One-line fact to remember."},
+            },
+            "required": ["key", "note"],
+        },
+        handler=remember,
+    )
+
+
 def _parse_goals(items: Any) -> list[Goal]:
     if not isinstance(items, list):
         raise AgentConfigError("goals must be a list")
@@ -799,7 +1048,7 @@ def _parse_goals(items: Any) -> list[Goal]:
 
 def _parse_memory(item: Any) -> MemoryPolicy:
     if item is None:
-        return MemoryPolicy(enabled=False, path=".memory/notes.md")
+        return MemoryPolicy(enabled=False, path=".memory/notes.md", max_tokens=1024)
     if not isinstance(item, dict):
         raise AgentConfigError("memory must be a mapping")
     enabled = item.get("enabled", False)
@@ -808,7 +1057,12 @@ def _parse_memory(item: Any) -> MemoryPolicy:
     path = item.get("path", ".memory/notes.md")
     if not isinstance(path, str) or not path.strip():
         raise AgentConfigError("memory.path must be a non-empty string")
-    return MemoryPolicy(enabled=enabled, path=path)
+    if Path(path).is_absolute() or ".." in Path(path).parts:
+        raise AgentConfigError("memory.path must stay inside the workspace")
+    max_tokens = item.get("max_tokens", 1024)
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+        raise AgentConfigError("memory.max_tokens must be a positive integer")
+    return MemoryPolicy(enabled=enabled, path=path, max_tokens=max_tokens)
 
 
 def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:
