@@ -22,7 +22,8 @@ from .core.message import Message, ToolCall
 from .models.base import ChatModel, Usage
 from .models.mock import MockChatModel
 from .models.openai_compat import OpenAIChatModel
-from .tools.base import Tool, ToolRegistry
+from .tools.base import Tool, ToolIsolation, ToolRegistry
+from .tools.exec import bash_tool
 from .tools.fs import fs_tools
 from .tracing.recorder import TraceRecorder
 
@@ -32,6 +33,12 @@ SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 DEFAULT_MAX_CONTEXT_TOKENS = 32000
 DEFAULT_KEEP_RECENT_ROUNDS = 6
 TOOL_HEAD_TAIL_CHARS = 500
+SKILL_ISOLATION = ToolIsolation(
+    level="read", network="none", fs_scope="none", resources={}
+)
+MEMORY_ISOLATION = ToolIsolation(
+    level="read", network="none", fs_scope="workspace_writable", resources={}
+)
 
 
 class AgentConfigError(ValueError):
@@ -510,6 +517,7 @@ class Agent:
                     tool_call_id=call.id,
                     name=call.name,
                     arguments=call.arguments,
+                    isolation=self._tool_isolation(call.name),
                 )
                 tracer.event(
                     "tool.result",
@@ -642,6 +650,7 @@ class Agent:
                         tool_call_id=call.id,
                         name=call.name,
                         arguments=call.arguments,
+                        isolation=self._tool_isolation(call.name),
                     )
                     checkpointer.save(state)
                     started = time.perf_counter()
@@ -859,6 +868,10 @@ class Agent:
         )
         return current, True
 
+    def _tool_isolation(self, name: str) -> dict[str, Any] | None:
+        item = self.tools.get(name)
+        return item.isolation.to_dict() if item and item.isolation else None
+
     def _state_hash(self) -> str:
         try:
             return State.load(self.state.path).hash
@@ -874,7 +887,8 @@ def build_tools(state: State, workspace: str | Path) -> ToolRegistry:
         if str(memory_dir) not in ("", "."):
             protected = (str(memory_dir),)
 
-    available = {item.name: item for item in fs_tools(root, protected=protected)}
+    sandboxed = [*fs_tools(root, protected=protected), bash_tool(root, protected=protected)]
+    available = {item.name: item for item in sandboxed}
     selected: list[Tool] = []
     for name in state.tool_names:
         item = available.get(name)
@@ -993,6 +1007,7 @@ def _skill_tool(state: State) -> Tool:
             "required": ["name"],
         },
         handler=load_skill,
+        isolation=SKILL_ISOLATION,
     )
 
 
@@ -1019,6 +1034,7 @@ def _memory_tool(memory: MemoryStore) -> Tool:
             "required": ["key", "note"],
         },
         handler=remember,
+        isolation=MEMORY_ISOLATION,
     )
 
 

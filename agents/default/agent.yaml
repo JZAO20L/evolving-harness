@@ -35,7 +35,7 @@ prompt:
 
 # Frozen tool surface. load_skill is added automatically when skills exist.
 tools:
-  enabled: [read_file, write_file, list_dir]
+  enabled: [read_file, write_file, list_dir, bash]
 
 # Mutable by RSI. Long-term goals, persistent across runs (not per-trigger input).
 # Injected into the system prompt at run start; not re-written per step.

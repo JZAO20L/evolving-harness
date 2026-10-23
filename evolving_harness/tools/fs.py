@@ -2,9 +2,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import Tool
+from .base import Tool, ToolIsolation
 
 MAX_OUTPUT_BYTES = 64 * 1024
+READ_ISOLATION = ToolIsolation(
+    level="read",
+    network="none",
+    fs_scope="workspace",
+    resources={"output_bytes": MAX_OUTPUT_BYTES},
+)
+WRITE_ISOLATION = ToolIsolation(
+    level="read",
+    network="none",
+    fs_scope="workspace_writable",
+    resources={"output_bytes": MAX_OUTPUT_BYTES},
+)
 
 
 def fs_tools(root: str | Path, protected: tuple[str, ...] = ()) -> list[Tool]:
@@ -80,6 +92,7 @@ def fs_tools(root: str | Path, protected: tuple[str, ...] = ()) -> list[Tool]:
                 "required": ["path"],
             },
             handler=read_file,
+            isolation=READ_ISOLATION,
         ),
         Tool(
             name="write_file",
@@ -93,6 +106,7 @@ def fs_tools(root: str | Path, protected: tuple[str, ...] = ()) -> list[Tool]:
                 "required": ["path", "content"],
             },
             handler=write_file,
+            isolation=WRITE_ISOLATION,
         ),
         Tool(
             name="list_dir",
@@ -105,5 +119,6 @@ def fs_tools(root: str | Path, protected: tuple[str, ...] = ()) -> list[Tool]:
                 "required": [],
             },
             handler=list_dir,
+            isolation=READ_ISOLATION,
         ),
     ]
