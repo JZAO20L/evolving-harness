@@ -29,6 +29,9 @@ from .tracing.recorder import TraceRecorder
 DEFAULT_TOOLS = ("read_file", "write_file", "list_dir")
 SKILL_TOOL = "load_skill"
 SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+DEFAULT_MAX_CONTEXT_TOKENS = 32000
+DEFAULT_KEEP_RECENT_ROUNDS = 6
+TOOL_HEAD_TAIL_CHARS = 500
 
 
 class AgentConfigError(ValueError):
@@ -83,6 +86,8 @@ class State:
     goals: tuple[Goal, ...] = ()
     memory: MemoryPolicy = field(default_factory=lambda: MemoryPolicy(False, ".memory/notes.md"))
     max_steps: int = 0
+    max_context_tokens: int = 0
+    keep_recent_rounds: int = 0
     tool_names: tuple[str, ...] = ()
     model_config: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -149,6 +154,22 @@ class State:
         if not 1 <= max_steps <= 100:
             raise AgentConfigError("limits.max_steps must be between 1 and 100")
 
+        max_context_tokens = limits.get("max_context_tokens", DEFAULT_MAX_CONTEXT_TOKENS)
+        if (
+            isinstance(max_context_tokens, bool)
+            or not isinstance(max_context_tokens, int)
+            or max_context_tokens < 1
+        ):
+            raise AgentConfigError("limits.max_context_tokens must be a positive integer")
+
+        keep_recent_rounds = limits.get("keep_recent_rounds", DEFAULT_KEEP_RECENT_ROUNDS)
+        if (
+            isinstance(keep_recent_rounds, bool)
+            or not isinstance(keep_recent_rounds, int)
+            or keep_recent_rounds < 1
+        ):
+            raise AgentConfigError("limits.keep_recent_rounds must be a positive integer")
+
         model_config = _mapping(raw, "model")
 
         snapshot = json.loads(json.dumps(raw, default=str))
@@ -167,6 +188,8 @@ class State:
             goals=tuple(goals),
             memory=memory,
             max_steps=max_steps,
+            max_context_tokens=max_context_tokens,
+            keep_recent_rounds=keep_recent_rounds,
             tool_names=tuple(enabled),
             model_config=model_config,
             raw=snapshot,
@@ -429,13 +452,25 @@ class Agent:
                     "model.request",
                     step=state.step,
                     message_count=len(state.messages),
+                    est_tokens=_estimate_messages(state.messages),
+                    message_tokens=[_estimate_message(msg) for msg in state.messages],
                     resume=True,
                 )
             for step in range(state.step + 1, self.state.max_steps + 1):
                 state.status = "running"
                 state.step = step
+                est_tokens, compacted = self._fit_context(state, step, tracer)
+                if compacted:
+                    checkpointer.save(state)
                 specs = self.tools.specs() or None
-                tracer.event("model.request", step=step, message_count=len(state.messages))
+                tracer.event(
+                    "model.request",
+                    step=step,
+                    message_count=len(state.messages),
+                    est_tokens=est_tokens,
+                    message_tokens=[_estimate_message(msg) for msg in state.messages],
+                    max_context_tokens=self.state.max_context_tokens,
+                )
                 started = time.perf_counter()
                 response = await self.model.complete(state.messages, tools=specs)
                 state.usage.add(response.usage)
@@ -531,6 +566,85 @@ class Agent:
             raise
         finally:
             tracer.close()
+
+    def _fit_context(
+        self, state: State, step: int, tracer: TraceRecorder
+    ) -> tuple[int, bool]:
+        """Estimate tokens and compact until the run fits ``max_context_tokens``.
+
+        Recent rounds stay verbatim. Older tool results are first rewritten to a
+        head/tail window; if that is not enough, the oldest whole rounds are dropped.
+        """
+        limit = self.state.max_context_tokens
+        before = _estimate_messages(state.messages)
+        if before <= limit:
+            return before, False
+
+        prefix_end, blocks = _turns(state.messages)
+        if not blocks:
+            return before, False
+
+        names = {
+            call.id: call.name
+            for message in state.messages
+            for call in message.tool_calls
+        }
+        keep = self.state.keep_recent_rounds
+        middle = blocks[:-keep]
+        recent = blocks[-keep:]
+
+        current = before
+        truncated = 0
+        for start, end in middle + recent:
+            if current <= limit:
+                break
+            for index in range(start, end):
+                if current <= limit:
+                    break
+                message = state.messages[index]
+                if message.role != "tool":
+                    continue
+                replacement = _summarize_tool_result(
+                    message.content, names.get(message.tool_call_id or "", "tool")
+                )
+                if replacement is None:
+                    continue
+                current += _estimate_tokens(replacement) - _estimate_tokens(message.content)
+                message.content = replacement
+                truncated += 1
+
+        dropped = 0
+        if current > limit and middle:
+            while dropped < len(middle):
+                start, end = middle[dropped]
+                current -= sum(_estimate_message(item) for item in state.messages[start:end])
+                dropped += 1
+                if current <= limit:
+                    break
+            if dropped:
+                next_start = blocks[dropped][0]
+                notice = Message(
+                    role="assistant",
+                    content=f"[context compacted: {dropped} earlier rounds omitted]",
+                )
+                state.messages = (
+                    state.messages[:prefix_end] + [notice] + state.messages[next_start:]
+                )
+                current = _estimate_messages(state.messages)
+
+        if not truncated and not dropped:
+            return before, False
+
+        tracer.event(
+            "context.compact",
+            step=step,
+            before_tokens=before,
+            after_tokens=current,
+            truncated_tool_results=truncated,
+            dropped_rounds=dropped,
+            max_context_tokens=limit,
+        )
+        return current, True
 
     def _state_hash(self) -> str:
         try:
@@ -718,3 +832,49 @@ def _env(value: Any) -> str:
 
 def _ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough budget estimate: ~4 characters per token."""
+    return (len(text) + 3) // 4
+
+
+def _estimate_message(message: Message) -> int:
+    tokens = _estimate_tokens(message.content) + 4
+    for call in message.tool_calls:
+        tokens += _estimate_tokens(call.name)
+        tokens += _estimate_tokens(json.dumps(call.arguments, ensure_ascii=False))
+    return tokens
+
+
+def _estimate_messages(messages: list[Message]) -> int:
+    return sum(_estimate_message(message) for message in messages)
+
+
+def _turns(messages: list[Message]) -> tuple[int, list[tuple[int, int]]]:
+    """Split messages into (prefix_end, assistant-led blocks).
+
+    The prefix holds the system prompt and the initial task; each block is one
+    assistant message plus the tool results that answer it.
+    """
+    starts = [
+        index for index, message in enumerate(messages) if message.role == "assistant"
+    ]
+    if not starts:
+        return len(messages), []
+    blocks = [
+        (start, starts[position + 1] if position + 1 < len(starts) else len(messages))
+        for position, start in enumerate(starts)
+    ]
+    return starts[0], blocks
+
+
+def _summarize_tool_result(content: str, name: str) -> str | None:
+    if len(content) <= TOOL_HEAD_TAIL_CHARS * 2 + 200:
+        return None
+    size = len(content.encode("utf-8"))
+    exit_code = 1 if content.startswith("ERROR:") else 0
+    return (
+        f"[tool result truncated: {name}, {size}B, exit={exit_code}]\n"
+        f"{content[:TOOL_HEAD_TAIL_CHARS]}\n...\n{content[-TOOL_HEAD_TAIL_CHARS:]}"
+    )

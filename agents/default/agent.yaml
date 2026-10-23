@@ -15,6 +15,10 @@ model:
 
 limits:
   max_steps: 20
+  # Rough len/4 estimate. Over budget, older tool results are truncated and then
+  # the oldest rounds dropped; the most recent rounds stay verbatim.
+  max_context_tokens: 32000
+  keep_recent_rounds: 6
 
 prompt:
   # Frozen: the harness contract.
