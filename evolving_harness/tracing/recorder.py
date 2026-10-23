@@ -14,12 +14,18 @@ class TraceRecorder:
     Event shape: {v, run_id, seq, ts, elapsed_ms, kind, data}
     """
 
-    def __init__(self, run_id: str, trace_dir: str | Path = "traces") -> None:
+    def __init__(
+        self, run_id: str, trace_dir: str | Path = "traces", *, append: bool = False
+    ) -> None:
         self.run_id = run_id
         self.path = Path(trace_dir) / f"{run_id}.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = self.path.open("w", encoding="utf-8")
         self._seq = 0
+        if append and self.path.is_file():
+            # A resumed run continues the same trace; keep the original events.
+            with self.path.open(encoding="utf-8") as existing:
+                self._seq = sum(1 for line in existing if line.strip())
+        self._file = self.path.open("a" if append else "w", encoding="utf-8")
         self._started = time.time()
 
     def event(self, kind: str, **data: Any) -> None:

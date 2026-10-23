@@ -543,7 +543,7 @@ class Agent:
                 raise AgentConfigError("checkpoint agent does not match current YAML")
             state = saved
             resumed = True
-            tracer = TraceRecorder(run_id, self.trace_dir)
+            tracer = TraceRecorder(run_id, self.trace_dir, append=True)
             tracer.event("run.recover", from_step=state.step, agent_hash=state.hash)
             self.memory.record("run.recover", run_id=run_id, from_step=state.step)
             # Tool calls dispatched but never settled before a restart: keep the

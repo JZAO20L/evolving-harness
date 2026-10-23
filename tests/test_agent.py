@@ -13,6 +13,7 @@ from evolving_harness.agent import (
 from evolving_harness.core.message import Message, ToolCall
 from evolving_harness.models.base import ModelResponse, Usage
 from evolving_harness.models.mock import MockChatModel
+from evolving_harness.tracing.recorder import TraceRecorder
 
 
 def test_state_loads_and_renders_prompt(make_agent):
@@ -207,6 +208,32 @@ async def test_resume_continues_from_checkpoint(make_agent, tmp_path):
     assert recover["from_step"] == 1
     assert events[-1]["kind"] == "run.end"
     assert events[-1]["data"]["status"] == "ok"
+
+
+async def test_resume_appends_to_existing_trace(make_agent, tmp_path):
+    state = State.load(make_agent())
+    rs = state.begin_run(task="append", run_id="r3")
+    rs.step = 1
+    Checkpointer(tmp_path / "traces").save(rs)
+    recorder = TraceRecorder("r3", tmp_path / "traces")
+    recorder.event("run.start", task="append")
+    recorder.event("model.request", step=1)
+    recorder.close()
+
+    agent = Agent(
+        model=MockChatModel([ModelResponse(content="final")]),
+        tools=build_tools(state, tmp_path / "ws"),
+        state=state,
+        trace_dir=tmp_path / "traces",
+    )
+    result = await agent.run("append", run_id="r3", resume=True)
+
+    events = [json.loads(line) for line in result.trace_path.read_text().splitlines()]
+    kinds = [event["kind"] for event in events]
+    assert kinds[:2] == ["run.start", "model.request"]  # original evidence kept
+    assert "run.recover" in kinds
+    seqs = [event["seq"] for event in events]
+    assert seqs == list(range(1, len(seqs) + 1))
 
 
 async def test_resume_marks_pending_call_unknown_not_rerun(make_agent, tmp_path):
