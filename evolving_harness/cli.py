@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 from .agent import (
     Agent,
     AgentConfigError,
-    AgentState,
     MaxStepsExceeded,
+    State,
     build_tools,
     create_model,
 )
@@ -58,7 +58,7 @@ async def _run(args: argparse.Namespace) -> int:
     workspace.mkdir(parents=True, exist_ok=True)
 
     try:
-        state = AgentState.load(args.agent)
+        state = State.load(args.agent)
         model = create_model(
             state,
             mock=args.mock,

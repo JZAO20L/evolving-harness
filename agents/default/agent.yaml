@@ -33,6 +33,18 @@ prompt:
 tools:
   enabled: [read_file, write_file, list_dir]
 
+# Mutable by RSI. Long-term goals, persistent across runs (not per-trigger input).
+# Injected into the system prompt at run start; not re-written per step.
+goals:
+  - id: goal-default
+    statement: Answer the user's task in the workspace, treating tool results as evidence.
+    priority: 1
+
+# Mutable by RSI. Write policy for the file memory (content lives in <workspace>/.memory/notes.md).
+memory:
+  enabled: false
+  path: .memory/notes.md
+
 # Mutable by RSI. Bodies are loaded on demand through load_skill.
 skills:
   - name: inspect-first

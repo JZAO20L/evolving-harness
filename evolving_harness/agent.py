@@ -12,7 +12,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,21 +47,60 @@ class Skill:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentState:
-    path: Path
-    version: int
-    name: str
-    system_prompt: str
-    guidance: str
-    skills: tuple[Skill, ...]
-    max_steps: int
-    tool_names: tuple[str, ...]
-    model_config: dict[str, Any]
-    raw: dict[str, Any]
-    digest: str
+class Goal:
+    id: str
+    statement: str
+    priority: int
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryPolicy:
+    enabled: bool
+    path: str
+
+
+@dataclass(slots=True)
+class State:
+    """Single state class. Two roles, one class.
+
+    Config role (from ``load``): static fields populated, dynamic fields default.
+    Run role (from ``begin_run`` / ``from_dict``): a run's dynamic fields layered on
+    the static identity (name / version / hash). A run is ``config.begin_run(task)``.
+
+    ``snapshot()`` serializes only the dynamic section plus the agent identity as
+    provenance; checkpoints never carry the full static config. On resume the
+    checkpoint's identity is validated against a freshly loaded config State, so a
+    mismatched agent is rejected instead of producing irreproducible results.
+    """
+
+    # --- static / identity (the RSI-mutable YAML; hash = canonical JSON of it) ---
+    path: Path = Path("")
+    version: int = 0
+    name: str = ""
+    system_prompt: str = ""
+    guidance: str = ""
+    skills: tuple[Skill, ...] = ()
+    goals: tuple[Goal, ...] = ()
+    memory: MemoryPolicy = field(default_factory=lambda: MemoryPolicy(False, ".memory/notes.md"))
+    max_steps: int = 0
+    tool_names: tuple[str, ...] = ()
+    model_config: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
+    digest: str = ""
+
+    # --- dynamic (one run; excluded from the identity hash; checkpointed) ---
+    run_id: str | None = None
+    task: str = ""
+    status: str | None = None
+    step: int = 0
+    messages: list[Message] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
+    pending: list[ToolCall] = field(default_factory=list)
+    parent_run_id: str | None = None
+    created_at: float = 0.0
 
     @classmethod
-    def load(cls, path: str | Path) -> AgentState:
+    def load(cls, path: str | Path) -> State:
         config_path = Path(path).resolve()
         if not config_path.is_file():
             raise AgentConfigError(f"agent config not found: {config_path}")
@@ -89,6 +128,8 @@ class AgentState:
             raise AgentConfigError("prompt.guidance must be a string")
 
         skills = _parse_skills(raw.get("skills") or [])
+        goals = _parse_goals(raw.get("goals") or [])
+        memory = _parse_memory(raw.get("memory"))
 
         tools = _mapping(raw, "tools")
         enabled = tools.get("enabled") or list(DEFAULT_TOOLS)
@@ -123,11 +164,79 @@ class AgentState:
             system_prompt=system_prompt,
             guidance=guidance,
             skills=tuple(skills),
+            goals=tuple(goals),
+            memory=memory,
             max_steps=max_steps,
             tool_names=tuple(enabled),
             model_config=model_config,
             raw=snapshot,
             digest=digest,
+        )
+
+    def begin_run(
+        self,
+        task: str,
+        *,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+    ) -> State:
+        """Seed a run State from this config State: copy the static identity, set
+        the run's dynamic fields and the initial system/user messages."""
+        return replace(
+            self,
+            run_id=run_id or uuid.uuid4().hex[:12],
+            task=task,
+            status="running",
+            step=0,
+            messages=[
+                Message(role="system", content=self.render_system_prompt()),
+                Message(role="user", content=task),
+            ],
+            usage=Usage(),
+            pending=[],
+            parent_run_id=parent_run_id,
+            created_at=time.time(),
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Dynamic section only + agent identity as provenance for resume."""
+        return {
+            "run_id": self.run_id,
+            "agent_name": self.name,
+            "agent_version": self.version,
+            "agent_hash": self.hash,
+            "task": self.task,
+            "status": self.status,
+            "step": self.step,
+            "messages": [msg.to_openai() for msg in self.messages],
+            "usage": self.usage.to_dict(),
+            "pending": [call.to_openai() for call in self.pending],
+            "parent_run_id": self.parent_run_id,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> State:
+        """Reconstruct a run State from a checkpoint (identity + dynamic fields).
+        The full static config is not present here; a freshly loaded config State
+        validates this one's identity before a resume."""
+        usage = data.get("usage") or {}
+        return cls(
+            name=data.get("agent_name", ""),
+            version=data.get("agent_version", 0),
+            digest=data.get("agent_hash", ""),
+            run_id=data["run_id"],
+            task=data.get("task", ""),
+            status=data.get("status", "running"),
+            step=data.get("step", 0),
+            messages=[Message.from_openai(msg) for msg in data.get("messages", [])],
+            usage=Usage(
+                prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                completion_tokens=int(usage.get("completion_tokens", 0)),
+            ),
+            pending=[ToolCall.from_openai(call) for call in data.get("pending", [])],
+            parent_run_id=data.get("parent_run_id"),
+            created_at=float(data.get("created_at", 0.0)),
         )
 
     @property
@@ -141,6 +250,13 @@ class AgentState:
         parts = [self.system_prompt.strip()]
         if self.guidance.strip():
             parts.append("## Working guidance\n" + self.guidance.strip())
+        if self.goals:
+            lines = ["## Goals"]
+            lines.extend(
+                f"- {goal.statement}"
+                for goal in sorted(self.goals, key=lambda item: item.priority)
+            )
+            parts.append("\n".join(lines))
         if self.skills:
             lines = [
                 "## Skills",
@@ -175,91 +291,8 @@ class AgentState:
         }
 
 
-@dataclass(slots=True)
-class RunState:
-    """Dynamic run state: the loop's only mutable surface.
-
-    Persisted via Checkpointer at clean step boundaries so a run can be resumed.
-    """
-
-    run_id: str
-    agent_name: str
-    agent_version: int
-    agent_hash: str
-    task: str
-    status: str
-    step: int
-    messages: list[Message] = field(default_factory=list)
-    usage: Usage = field(default_factory=Usage)
-    pending: list[ToolCall] = field(default_factory=list)
-    parent_run_id: str | None = None
-    created_at: float = 0.0
-
-    @classmethod
-    def new(
-        cls,
-        run_id: str,
-        state: AgentState,
-        task: str,
-        *,
-        parent_run_id: str | None = None,
-    ) -> RunState:
-        return cls(
-            run_id=run_id,
-            agent_name=state.name,
-            agent_version=state.version,
-            agent_hash=state.hash,
-            task=task,
-            status="running",
-            step=0,
-            messages=[
-                Message(role="system", content=state.render_system_prompt()),
-                Message(role="user", content=task),
-            ],
-            parent_run_id=parent_run_id,
-            created_at=time.time(),
-        )
-
-    def snapshot(self) -> dict[str, Any]:
-        return {
-            "run_id": self.run_id,
-            "agent_name": self.agent_name,
-            "agent_version": self.agent_version,
-            "agent_hash": self.agent_hash,
-            "task": self.task,
-            "status": self.status,
-            "step": self.step,
-            "messages": [msg.to_openai() for msg in self.messages],
-            "usage": self.usage.to_dict(),
-            "pending": [call.to_openai() for call in self.pending],
-            "parent_run_id": self.parent_run_id,
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> RunState:
-        usage = data.get("usage") or {}
-        return cls(
-            run_id=data["run_id"],
-            agent_name=data.get("agent_name", ""),
-            agent_version=data.get("agent_version", 0),
-            agent_hash=data.get("agent_hash", ""),
-            task=data.get("task", ""),
-            status=data.get("status", "running"),
-            step=data.get("step", 0),
-            messages=[Message.from_openai(msg) for msg in data.get("messages", [])],
-            usage=Usage(
-                prompt_tokens=int(usage.get("prompt_tokens", 0)),
-                completion_tokens=int(usage.get("completion_tokens", 0)),
-            ),
-            pending=[ToolCall.from_openai(call) for call in data.get("pending", [])],
-            parent_run_id=data.get("parent_run_id"),
-            created_at=float(data.get("created_at", 0.0)),
-        )
-
-
 class Checkpointer:
-    """Writes RunState snapshots so runs can resume after a restart."""
+    """Writes state snapshots so runs can resume after a restart."""
 
     def __init__(self, trace_dir: str | Path = "traces") -> None:
         self.dir = Path(trace_dir)
@@ -268,7 +301,9 @@ class Checkpointer:
     def path_for(self, run_id: str) -> Path:
         return self.dir / f"{run_id}.checkpoint.json"
 
-    def save(self, state: RunState) -> None:
+    def save(self, state: State) -> None:
+        if state.run_id is None:
+            raise ValueError("cannot checkpoint a config-only State without a run_id")
         path = self.path_for(state.run_id)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(
@@ -277,12 +312,12 @@ class Checkpointer:
         )
         tmp.replace(path)
 
-    def load(self, run_id: str) -> RunState | None:
+    def load(self, run_id: str) -> State | None:
         path = self.path_for(run_id)
         if not path.is_file():
             return None
         try:
-            return RunState.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            return State.from_dict(json.loads(path.read_text(encoding="utf-8")))
         except (ValueError, KeyError, TypeError):
             return None
 
@@ -307,7 +342,7 @@ class Agent:
         self,
         model: ChatModel,
         tools: ToolRegistry,
-        state: AgentState,
+        state: State,
         trace_dir: str | Path = "traces",
     ) -> None:
         self.model = model
@@ -324,7 +359,7 @@ class Agent:
     ) -> RunResult:
         checkpointer = Checkpointer(self.trace_dir)
         tracer: TraceRecorder
-        state: RunState
+        state: State
         resumed = False
 
         if resume:
@@ -333,12 +368,12 @@ class Agent:
             saved = checkpointer.load(run_id)
             if saved is None:
                 raise RuntimeError(f"no checkpoint for run {run_id}")
-            if saved.agent_name != self.state.name or saved.agent_hash != self.state.hash:
+            if saved.name != self.state.name or saved.hash != self.state.hash:
                 raise AgentConfigError("checkpoint agent does not match current YAML")
             state = saved
             resumed = True
             tracer = TraceRecorder(run_id, self.trace_dir)
-            tracer.event("run.recover", from_step=state.step, agent_hash=state.agent_hash)
+            tracer.event("run.recover", from_step=state.step, agent_hash=state.hash)
             # Tool calls dispatched but never settled before a restart: keep the
             # intent, mark the outcome unknown, and never re-dispatch them.
             for call in state.pending:
@@ -369,8 +404,8 @@ class Agent:
             state.status = "running"
             checkpointer.save(state)
         else:
-            run_id = run_id or uuid.uuid4().hex[:12]
-            state = RunState.new(run_id=run_id, state=self.state, task=task)
+            state = self.state.begin_run(task=task, run_id=run_id)
+            run_id = state.run_id
             tracer = TraceRecorder(run_id, self.trace_dir)
             runtime = self.state.runtime()
             tracer.event(
@@ -499,12 +534,12 @@ class Agent:
 
     def _state_hash(self) -> str:
         try:
-            return AgentState.load(self.state.path).hash
+            return State.load(self.state.path).hash
         except AgentConfigError:
             return ""
 
 
-def build_tools(state: AgentState, workspace: str | Path) -> ToolRegistry:
+def build_tools(state: State, workspace: str | Path) -> ToolRegistry:
     available = {item.name: item for item in fs_tools(workspace)}
     selected: list[Tool] = []
     for name in state.tool_names:
@@ -521,7 +556,7 @@ def build_tools(state: AgentState, workspace: str | Path) -> ToolRegistry:
 
 
 def create_model(
-    state: AgentState,
+    state: State,
     *,
     mock: bool = False,
     model: str | None = None,
@@ -561,7 +596,7 @@ async def run_agent(
     run_id: str | None = None,
     mock: bool = False,
 ) -> RunResult:
-    state = AgentState.load(agent_path)
+    state = State.load(agent_path)
     owns_model = model is None
     if model is None:
         model = create_model(state, mock=mock)
@@ -602,7 +637,7 @@ def _parse_skills(items: Any) -> list[Skill]:
     return skills
 
 
-def _skill_tool(state: AgentState) -> Tool:
+def _skill_tool(state: State) -> Tool:
     def load_skill(name: str) -> str:
         item = state.skill(name)
         if item is None:
@@ -622,6 +657,44 @@ def _skill_tool(state: AgentState) -> Tool:
         },
         handler=load_skill,
     )
+
+
+def _parse_goals(items: Any) -> list[Goal]:
+    if not isinstance(items, list):
+        raise AgentConfigError("goals must be a list")
+    goals: list[Goal] = []
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise AgentConfigError(f"goals[{index}] must be a mapping")
+        goal_id = item.get("id")
+        if not isinstance(goal_id, str) or not SKILL_NAME.fullmatch(goal_id):
+            raise AgentConfigError(f"goals[{index}].id must match {SKILL_NAME.pattern}")
+        if goal_id in seen:
+            raise AgentConfigError(f"duplicate goal id: {goal_id}")
+        statement = item.get("statement")
+        if not isinstance(statement, str) or not statement.strip():
+            raise AgentConfigError(f"goals[{index}].statement must be a non-empty string")
+        priority = item.get("priority", 1)
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            raise AgentConfigError(f"goals[{index}].priority must be an integer")
+        seen.add(goal_id)
+        goals.append(Goal(id=goal_id, statement=statement, priority=priority))
+    return goals
+
+
+def _parse_memory(item: Any) -> MemoryPolicy:
+    if item is None:
+        return MemoryPolicy(enabled=False, path=".memory/notes.md")
+    if not isinstance(item, dict):
+        raise AgentConfigError("memory must be a mapping")
+    enabled = item.get("enabled", False)
+    if isinstance(enabled, bool) is False:
+        raise AgentConfigError("memory.enabled must be a boolean")
+    path = item.get("path", ".memory/notes.md")
+    if not isinstance(path, str) or not path.strip():
+        raise AgentConfigError("memory.path must be a non-empty string")
+    return MemoryPolicy(enabled=enabled, path=path)
 
 
 def _mapping(raw: dict[str, Any], key: str) -> dict[str, Any]:

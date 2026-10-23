@@ -22,4 +22,4 @@ message = await registry.dispatch(tool_call) # 永远返回 Message
 - `dispatch` 不抛异常：未知工具、参数错误、业务错误都变成 `ERROR: ...` 内容。
 - 路径一律 `resolve()` 后校验 `is_relative_to(workspace)`。
 - 工具输出有字节上限（当前 64KB），超出截断并标注。
-- 执行类工具（shell / 代码）在 v0.2 接入，必须声明隔离档位与资源预算，不能直接 `subprocess` 起在 API 进程里。
+- 执行类工具（shell / 代码）在 v0.1 以 spawn 级隔离接入，必须声明隔离档位与资源预算，不能直接 `subprocess` 起在 API 进程里；正式容器沙箱在 v0.3 落地。

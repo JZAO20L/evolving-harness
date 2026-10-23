@@ -2,14 +2,14 @@ import json
 
 import pytest
 
-from evolving_harness.agent import Agent, AgentState, MaxStepsExceeded, build_tools
+from evolving_harness.agent import Agent, MaxStepsExceeded, State, build_tools
 from evolving_harness.core.message import ToolCall
 from evolving_harness.models.base import ModelResponse, Usage
 from evolving_harness.models.mock import MockChatModel
 
 
 def build_agent(make_agent, tmp_path, responses, max_steps=5):
-    state = AgentState.load(make_agent(limits={"max_steps": max_steps}))
+    state = State.load(make_agent(limits={"max_steps": max_steps}))
     return Agent(
         model=MockChatModel(responses),
         tools=build_tools(state, tmp_path / "ws"),

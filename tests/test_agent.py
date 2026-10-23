@@ -6,9 +6,8 @@ import yaml
 from evolving_harness.agent import (
     Agent,
     AgentConfigError,
-    AgentState,
     Checkpointer,
-    RunState,
+    State,
     build_tools,
 )
 from evolving_harness.core.message import Message, ToolCall
@@ -17,7 +16,7 @@ from evolving_harness.models.mock import MockChatModel
 
 
 def test_state_loads_and_renders_prompt(make_agent):
-    state = AgentState.load(make_agent())
+    state = State.load(make_agent())
 
     assert state.version == 1
     assert len(state.hash) == 64
@@ -30,14 +29,33 @@ def test_state_loads_and_renders_prompt(make_agent):
 
 
 def test_state_hash_tracks_semantic_content(make_agent):
-    first = AgentState.load(make_agent())
-    second = AgentState.load(make_agent(prompt={"guidance": "Check twice."}))
+    first = State.load(make_agent())
+    second = State.load(make_agent(prompt={"guidance": "Check twice."}))
 
     assert first.hash != second.hash
 
 
+def test_goals_rendered_into_prompt_and_tracked_by_identity(make_agent):
+    state = State.load(
+        make_agent(
+            goals=[
+                {"id": "g1", "statement": "Stay grounded in tool evidence.", "priority": 2},
+                {"id": "g2", "statement": "Finish in the workspace.", "priority": 1},
+            ]
+        )
+    )
+
+    prompt = state.render_system_prompt()
+    assert "## Goals" in prompt
+    assert "Finish in the workspace." in prompt
+    assert "Stay grounded in tool evidence." in prompt
+
+    without_goals = State.load(make_agent())
+    assert without_goals.hash != state.hash  # goals are part of the identity
+
+
 async def test_load_skill_tool(make_agent, tmp_path):
-    state = AgentState.load(make_agent())
+    state = State.load(make_agent())
     registry = build_tools(state, tmp_path / "ws")
 
     loaded = await registry.dispatch(
@@ -63,18 +81,18 @@ async def test_load_skill_tool(make_agent, tmp_path):
 )
 def test_invalid_skills_are_rejected(make_agent, skills):
     with pytest.raises(AgentConfigError):
-        AgentState.load(make_agent(skills=skills))
+        State.load(make_agent(skills=skills))
 
 
 def test_unknown_tool_is_rejected(make_agent, tmp_path):
-    state = AgentState.load(make_agent(tools={"enabled": ["nope"]}))
+    state = State.load(make_agent(tools={"enabled": ["nope"]}))
 
     with pytest.raises(AgentConfigError):
         build_tools(state, tmp_path / "ws")
 
 
 async def test_trace_records_state_and_runtime(make_agent, tmp_path):
-    state = AgentState.load(make_agent())
+    state = State.load(make_agent())
     agent = Agent(
         model=MockChatModel(),
         tools=build_tools(state, tmp_path / "ws"),
@@ -110,7 +128,7 @@ class DriftingModel(MockChatModel):
 
 async def test_state_drift_invalidates_the_run(make_agent, tmp_path):
     path = make_agent()
-    state = AgentState.load(path)
+    state = State.load(path)
     agent = Agent(
         model=DriftingModel(path),
         tools=build_tools(state, tmp_path / "ws"),
@@ -126,14 +144,15 @@ async def test_state_drift_invalidates_the_run(make_agent, tmp_path):
     assert events[-1]["data"]["state_hash"] != state.hash
 
 
-def test_run_state_snapshot_roundtrips(make_agent):
-    state = AgentState.load(make_agent())
-    rs = RunState.new(run_id="abc", state=state, task="hi")
+def test_state_snapshot_roundtrips(make_agent):
+    state = State.load(make_agent())
+    run = state.begin_run(task="hi", run_id="abc")
 
-    back = RunState.from_dict(rs.snapshot())
+    back = State.from_dict(run.snapshot())
 
     assert back.run_id == "abc"
-    assert back.agent_hash == state.hash
+    assert back.hash == state.hash
+    assert back.name == "test"
     assert back.task == "hi"
     assert back.step == 0
     assert [m.role for m in back.messages] == ["system", "user"]
@@ -142,25 +161,25 @@ def test_run_state_snapshot_roundtrips(make_agent):
 
 
 def test_checkpointer_saves_and_loads(make_agent, tmp_path):
-    state = AgentState.load(make_agent())
-    rs = RunState.new(run_id="ck", state=state, task="t")
+    state = State.load(make_agent())
+    run = state.begin_run(task="t", run_id="ck")
 
     cp = Checkpointer(tmp_path / "traces")
-    cp.save(rs)
+    cp.save(run)
     loaded = cp.load("ck")
 
     assert loaded is not None
     assert loaded.run_id == "ck"
     assert loaded.task == "t"
-    assert loaded.agent_name == "test"
-    assert loaded.agent_hash == state.hash
+    assert loaded.name == "test"
+    assert loaded.hash == state.hash
 
 
 async def test_resume_continues_from_checkpoint(make_agent, tmp_path):
     path = make_agent()
-    state = AgentState.load(path)
+    state = State.load(path)
     call = ToolCall(id="c1", name="list_dir", arguments={})
-    rs = RunState.new(run_id="r1", state=state, task="continue")
+    rs = state.begin_run(task="continue", run_id="r1")
     rs.step = 1
     rs.messages = [
         Message(role="system", content=state.render_system_prompt()),
@@ -192,11 +211,11 @@ async def test_resume_continues_from_checkpoint(make_agent, tmp_path):
 
 async def test_resume_marks_pending_call_unknown_not_rerun(make_agent, tmp_path):
     path = make_agent()
-    state = AgentState.load(path)
+    state = State.load(path)
     call = ToolCall(
         id="c1", name="write_file", arguments={"path": "x.txt", "content": "boom"}
     )
-    rs = RunState.new(run_id="r2", state=state, task="pend")
+    rs = state.begin_run(task="pend", run_id="r2")
     rs.step = 1
     rs.messages = [
         Message(role="system", content=state.render_system_prompt()),
