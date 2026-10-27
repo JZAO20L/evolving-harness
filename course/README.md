@@ -115,9 +115,8 @@ course/
 
 ```
 Agent
-  [x] ch01 llm-call    [x] ch02 agent-loop  [x] ch03 tool-use
-  [ ] ch04 skills      [ ] ch05 memory      [ ] ch06 plan
-  [ ] ch07 sub-agent
+  [x] ch01 llm-call    [x] ch02 agent-loop  [x] ch03 tool-use      [x] ch04 skills
+  [ ] ch05 memory      [ ] ch06 plan       [ ] ch07 sub-agent
 RSI
   [ ] ch08 rl-loop     [ ] ch09 prompt      [ ] ch10 skills
   [ ] ch11 memory      [ ] ch12 agent       [ ] ch13 meta
