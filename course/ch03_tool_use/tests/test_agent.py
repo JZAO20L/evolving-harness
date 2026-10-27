@@ -7,6 +7,7 @@ from agent import (
     MockChatModel,
     ModelResult,
     OpenAIChatModel,
+    PathPolicy,
     Tool,
     ToolCall,
     ToolRegistry,
@@ -211,7 +212,65 @@ async def test_loop_default_system_lists_tools():
     sys_msg = rec.calls[0][0][0]
     assert sys_msg.role == "system" and "add" in sys_msg.content
 
-# --- 只读内置工具（仿 nano-harness：连到世界 + 信息丰富错误串） --------------- #
+# --- PathPolicy：静态 allow/deny + realpath 规约，拒绝当数据 ------------------- #
+def test_policy_allows_within_root(tmp_path):
+    whitelisted = tmp_path / "agent.py"
+    whitelisted.write_text("x")
+    policy = PathPolicy(allow_root=str(tmp_path))
+    ok, why = policy.judge(str(whitelisted))
+    assert ok and why == "ok"
+
+
+def test_policy_denies_sensitive_name(tmp_path):
+    (tmp_path / ".env").write_text("ARK_API_KEY=secret")
+    policy = PathPolicy(allow_root=str(tmp_path))
+    ok, why = policy.judge(str(tmp_path / ".env"))
+    assert not ok and ".env" in why
+
+
+def test_policy_denies_escape_via_parent_dotdot(tmp_path):
+    outside = tmp_path.parent / "secret.txt"
+    outside.write_text("s")  # allow_root 之外
+    policy = PathPolicy(allow_root=str(tmp_path))
+    # ../ 逃逸：canonical 后仍落在根外 -> 拒
+    ok, why = policy.judge(str(tmp_path / ".." / outside.name))
+    assert not ok and "越出" in why
+
+
+def test_policy_denies_system_prefix(tmp_path):
+    policy = PathPolicy(allow_root=str(tmp_path))
+    ok, why = policy.judge("/etc/hosts")
+    assert not ok and ("系统前缀" in why or "越出" in why)
+
+
+def test_read_file_with_policy_denies_env_when_data(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("ARK_API_KEY=secret")
+    policy = PathPolicy(allow_root=str(tmp_path))
+    out = read_file(str(env), policy=policy)
+    assert out.startswith("拒绝") and ".env" in out
+
+
+def test_read_file_with_policy_allows_inside(tmp_path):
+    f = tmp_path / "readme.txt"
+    f.write_text("hello world")
+    policy = PathPolicy(allow_root=str(tmp_path))
+    assert read_file(str(f), policy=policy) == "hello world"
+
+
+async def test_builtin_read_tools_carry_default_policy():
+    reg = ToolRegistry()
+    for t in builtin_read_tools():
+        reg.register(t)
+    # 默认 policy allow_root = agent.py 所在目录；对外部系统文件应拒绝（当数据）
+    out = await reg.call(ToolCall("c1", "read_file", {"path": "/etc/hosts"}))
+    assert out.startswith("拒绝")
+    # allow_root 内文件仍可读
+    here = PathPolicy()._base()
+    ok = await reg.call(ToolCall("c1", "list_dir", {"path": here}))
+    assert ok.startswith(here) and not ok.startswith("拒绝")
+
+
 def test_read_file_reads_existing():
     out = read_file(__file__, max_chars=6000)
     assert out.startswith("import json")

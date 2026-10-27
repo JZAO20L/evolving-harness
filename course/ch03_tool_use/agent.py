@@ -371,16 +371,60 @@ class AgentLoop:
 
 
 # --------------------------------------------------------------------------- #
-# ch03 · 演示性只读工具（仿 nano-harness 的工具设计：连到世界 + 信息丰富错误串）
+# ch03 · 路径安全策略（PathPolicy）：静态 allow/deny + realpath 规约
 # --------------------------------------------------------------------------- #
-# 这两只是"把 agent 连到世界"的最小只读工具。核心两点（nano_harness 提炼）：
+# 静态为主的第一道安全：只读工具也要限——否则 agent 能读仓库里任何文件（.env/.git/…）。
+# 机制（薄版）：
+#   - canonical 规约：realpath 消掉 ../ 与符号链接（堵路径逃逸）；
+#   - allow_root：只许"允许根"以内的路径（默认 = 本文件所在目录）；
+#   - deny_names / deny_prefixes：命中的名字（.env/.git/__pycache__…）或系统前缀（/etc 等）直接拒。
+#   - 拒绝**当数据**：拒绝返回可读原因串，agent 据此换方向，循环不炸。
+
+
+@dataclass
+class PathPolicy:
+    allow_root: str = ""   # 空 -> 默认取 agent.py 所在目录；只在它内部放行
+    deny_names: frozenset = frozenset({".env", ".git", ".ssh", "__pycache__",
+                                       "node_modules", "dist", "build"})
+    deny_prefixes: tuple = ("/etc", "/proc", "/sys", "/dev", "/var/run")
+
+    def _base(self) -> str:
+        if self.allow_root:
+            return os.path.realpath(self.allow_root)
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def judge(self, path: str) -> tuple[bool, str]:
+        """canonical 后判定是否放行。返回 (允许?, 原因)。拒绝也是给 agent 的信息，不抛。"""
+        p = os.path.abspath(path)
+        rp = os.path.realpath(p)                    # 消 ../ 与符号链接
+        for comp in rp.split("/"):
+            if comp in self.deny_names:
+                return False, f"命中被禁名: {comp!r}"
+        for prefix in self.deny_prefixes:
+            if rp.startswith(prefix):
+                return False, f"命中禁读系统前缀: {prefix}"
+        base = self._base()
+        if rp != base and not rp.startswith(base + os.sep):
+            return False, f"越出允许根 {base!r}"
+        return True, "ok"
+
+
+# --------------------------------------------------------------------------- #
+# ch03 · 演示性只读工具（仿 nano-harness：连到世界 + 信息丰富错误串 + 静态路径安全）
+# --------------------------------------------------------------------------- #
+# 这两只是"把 agent 连到世界"的最小只读工具。核心三点（nano_harness 提炼）：
 #   - 每个工具要有大小上限 / 超时 / 信息丰富的错误串，agent 才能据以适应；
-#   - 错误尽量**当数据**返回可读字符串，而不是让循环炸掉。
+#   - 错误尽量**当数据**返回可读字符串，而不是让循环炸掉；
+#   - 只读也要过 PathPolicy 静态安全（默认 deny .env/.git/系统前缀，且不许逃出允许根）。
 # 写文件 / 跑命令 / 网络这类高权限工具留到后续章（ch20 沙箱、写保护与命令白名单）。
 
 
-def list_dir(path: str = ".") -> str:
+def list_dir(path: str = ".", policy: PathPolicy | None = None) -> str:
     """列出目录内容。路径不存在/不是目录时返回信息丰富的错误串（不抛）。"""
+    if policy is not None:
+        allowed, why = policy.judge(path)
+        if not allowed:
+            return f"拒绝：{why}"
     p = os.path.abspath(path)
     if not os.path.isdir(p):
         return f"错误：不是目录: {path!r}"
@@ -393,8 +437,12 @@ def list_dir(path: str = ".") -> str:
     return f"{p}:\n" + "\n".join(entries)
 
 
-def read_file(path: str, max_chars: int = 4000) -> str:
-    """读取文本文件，超 ``max_chars`` 截断。缺失/不可读时返回可读错误串。"""
+def read_file(path: str, max_chars: int = 4000, policy: PathPolicy | None = None) -> str:
+    """读取文本文件，超 ``max_chars`` 截断。缺失/不可读/被拒时返回可读错误串（当数据）。"""
+    if policy is not None:
+        allowed, why = policy.judge(path)
+        if not allowed:
+            return f"拒绝：{why}"
     p = os.path.abspath(path)
     if not os.path.isfile(p):
         return f"错误：不是文件: {path!r}"
@@ -408,17 +456,25 @@ def read_file(path: str, max_chars: int = 4000) -> str:
     return text
 
 
-def builtin_read_tools() -> list[Tool]:
-    """打包两个只读工具成可直接 register 的列表（demo/冒烟用）。"""
+def builtin_read_tools(policy: PathPolicy | None = None) -> list[Tool]:
+    """打包两个只读工具成可直接 register 的列表（demo/冒烟用）。
+
+    默认挂一个 PathPolicy（只许读本目录、拒 .env/.git/系统前缀）——只读也安全。
+    """
+    if policy is None:
+        policy = PathPolicy()
     return [
-        Tool(name="list_dir", description="列出一个目录的内容（只读）",
+        Tool(name="list_dir",
+             description=f"列出一个目录的内容（只读；只允许 {policy._base()} 内）",
              parameters={"type": "object",
                          "properties": {"path": {"type": "string"}}},
-             handler=lambda a: list_dir(a.get("path", "."))),
-        Tool(name="read_file", description="读取文本文件开头若干字符（只读，可截断）",
+             handler=lambda a: list_dir(a.get("path", "."), policy=policy)),
+        Tool(name="read_file",
+             description=f"读取文本文件开头若干字符（只读、可截断；只允许 {policy._base()} 内）",
              parameters={"type": "object",
                          "properties": {"path": {"type": "string"},
                                         "max_chars": {"type": "integer"}},
                          "required": ["path"]},
-             handler=lambda a: read_file(a["path"], int(a.get("max_chars", 4000)))),
+             handler=lambda a: read_file(a["path"], int(a.get("max_chars", 4000)),
+                                         policy=policy)),
     ]

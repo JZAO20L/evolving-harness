@@ -100,23 +100,36 @@ asyncio.run(demo())
 
 ### 只读内置工具 `list_dir` / `read_file` / `builtin_read_tools()`（仿 nano-harness）
 演示「工具连到世界」的最小只读集：`list_dir(path)` 列目录、`read_file(path, max_chars=4000)`
-读文件（超长截断）。两个关键设计来自 nano-harness：**大小上限**（`max_chars`）+ **信息丰富错误串**
-（路径不存在返回「错误：不是文件: …」而非抛异常，agent 才能据以修正）。`builtin_read_tools()`
-把它们打包成可直接 `register` 的 `Tool` 列表。写文件 / 跑命令 / 网络等高权限工具刻意**不在此章**，
-留到 ch20 沙箱 / 写保护 / 命令白名单。
+读文件（超长截断）。三个关键设计来自 nano-harness：**大小上限**（`max_chars`）+ **信息丰富错误串**
+（路径不存在返回「错误：不是文件: …」而非抛异常，agent 才能据以修正）+ **静态路径安全**。
+`builtin_read_tools()` 把它们打包成可直接 `register` 的 `Tool` 列表。写文件 / 跑命令 / 网络等
+高权限工具刻意**不在此章**，留到 ch20 沙箱 / 写保护 / 命令白名单。
 
 ```python
 from agent import ToolRegistry, builtin_read_tools
 reg = ToolRegistry()
 for t in builtin_read_tools():
-    reg.register(t)
+    reg.register(t)          # 默认自带 PathPolicy：只在 agent.py 所在目录内放行
 ```
+
+### `PathPolicy(allow_root, deny_names, deny_prefixes)` —— 静态路径安全
+只读也要限，否则 agent 能读仓库里任何文件（`.env` / `.git` / `/etc` …）。`PathPolicy` 是最薄的一道：
+
+1. **canonical 规约**：`realpath` 消掉 `../` 与符号链接，堵死路径逃逸；
+2. **allow_root**：只允许「允许根」以内（默认 = `agent.py` 所在目录）；
+3. **deny_names / deny_prefixes**：命中被禁名（`.env`/`.git`/`__pycache__`…）或系统前缀（`/etc`/`/proc`…）直接拒。
+
+`judge(path) -> (allowed, reason)` 不抛；`read_file`/`list_dir` 收到 policy 时，拒绝返回「拒绝：原因」
+**当数据**回填——agent 会换方向，循环不炸（和「错误当数据」同一句）。`builtin_read_tools()` 默认就挂上
+`PathPolicy()`。动态授权（临时放行某路径、approve/deny 按钮）是它的**第二道**，因需把决定送到 UI，
+留到 ch17 WebSocket / ch21 gradio 那章。
 
 ## 3. 本课做到 / 没做到
 
 **做到**：原生 function calling 闭环（注册表 → 注入 schema → 模型吐 tool_calls → 执行 → 观察回填）；
 工具 handler 兼容 async/sync；**错误当数据**（未知工具 / handler 异常都转观察文本，循环不炸）；
 一个**真实只读工具集**（`list_dir` / `read_file`，带 `max_chars` 截断 + 信息丰富错误串）；
+**静态路径安全**（`PathPolicy`：realpath 规约 + allow_root + deny 名单，拒绝当数据）；
 步数 + 用量 + 工具调用记录。
 **没做到（留给后续）**：技能（ch04）；记忆（ch05）；子代理（ch07）；**写文件 / 跑命令 / 网络**等高权限
 工具及其沙箱 / 写保护 / 命令白名单（ch20）。工具的执行仍是循环里顺序 async，并发在边界注入。
@@ -137,6 +150,10 @@ for t in builtin_read_tools():
 12. 无工具时循环退化为什么？`complete(context, tools=[])` 与「直接答」等价吗？
 13. 为什么每个工具都要有**大小上限 / 超时 / 信息丰富的错误串**？（nano-harness：tool 连到世界，agent 靠错误串适应）
 14. 工具的安全边界：读 vs 写、命令白名单、网络——为什么高权限工具要靠后/单独治理（对应 ch20 沙箱）？
+15. 路径逃逸有哪几招？（`../`、符号链接、绝对路径）为什么先 `realpath` 规约再做 allow/deny？
+16. deny 名单 vs allow 白名单：哪个更安全？`allow_root` 默认取 agent.py 目录够用吗，真实产品该取哪？
+17. 「拒绝当数据」vs「拒绝就抛」：agent 拿到拒绝串能自救吗？为什么拒绝信息要**可读、可据以修正**？
+18. 静态策略挡不住什么（用户临时想读某处）？动态授权为何必须把决定前送到 UI（ch17/21）？
 
 ## 5. 生产版延伸阅读（复用 + 回填）
 
