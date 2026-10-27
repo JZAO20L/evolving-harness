@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import random
 from dataclasses import dataclass, field
 
@@ -367,3 +368,57 @@ class AgentLoop:
                                        content=observation))
 
         return LoopResult(finished=False, steps=self.max_steps, usage=total, tool_calls=done)
+
+
+# --------------------------------------------------------------------------- #
+# ch03 · 演示性只读工具（仿 nano-harness 的工具设计：连到世界 + 信息丰富错误串）
+# --------------------------------------------------------------------------- #
+# 这两只是"把 agent 连到世界"的最小只读工具。核心两点（nano_harness 提炼）：
+#   - 每个工具要有大小上限 / 超时 / 信息丰富的错误串，agent 才能据以适应；
+#   - 错误尽量**当数据**返回可读字符串，而不是让循环炸掉。
+# 写文件 / 跑命令 / 网络这类高权限工具留到后续章（ch20 沙箱、写保护与命令白名单）。
+
+
+def list_dir(path: str = ".") -> str:
+    """列出目录内容。路径不存在/不是目录时返回信息丰富的错误串（不抛）。"""
+    p = os.path.abspath(path)
+    if not os.path.isdir(p):
+        return f"错误：不是目录: {path!r}"
+    try:
+        entries = sorted(os.listdir(p))
+    except OSError as exc:
+        return f"错误（{type(exc).__name__}）: {exc}"
+    if not entries:
+        return f"{p}: （空目录）"
+    return f"{p}:\n" + "\n".join(entries)
+
+
+def read_file(path: str, max_chars: int = 4000) -> str:
+    """读取文本文件，超 ``max_chars`` 截断。缺失/不可读时返回可读错误串。"""
+    p = os.path.abspath(path)
+    if not os.path.isfile(p):
+        return f"错误：不是文件: {path!r}"
+    try:
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return f"错误（{type(exc).__name__}）: {exc}"
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n…[已截断：全文 {len(text)} 字符，只显示前 {max_chars}]"
+    return text
+
+
+def builtin_read_tools() -> list[Tool]:
+    """打包两个只读工具成可直接 register 的列表（demo/冒烟用）。"""
+    return [
+        Tool(name="list_dir", description="列出一个目录的内容（只读）",
+             parameters={"type": "object",
+                         "properties": {"path": {"type": "string"}}},
+             handler=lambda a: list_dir(a.get("path", "."))),
+        Tool(name="read_file", description="读取文本文件开头若干字符（只读，可截断）",
+             parameters={"type": "object",
+                         "properties": {"path": {"type": "string"},
+                                        "max_chars": {"type": "integer"}},
+                         "required": ["path"]},
+             handler=lambda a: read_file(a["path"], int(a.get("max_chars", 4000)))),
+    ]

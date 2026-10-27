@@ -98,13 +98,28 @@ async def demo():
 asyncio.run(demo())
 ```
 
+### 只读内置工具 `list_dir` / `read_file` / `builtin_read_tools()`（仿 nano-harness）
+演示「工具连到世界」的最小只读集：`list_dir(path)` 列目录、`read_file(path, max_chars=4000)`
+读文件（超长截断）。两个关键设计来自 nano-harness：**大小上限**（`max_chars`）+ **信息丰富错误串**
+（路径不存在返回「错误：不是文件: …」而非抛异常，agent 才能据以修正）。`builtin_read_tools()`
+把它们打包成可直接 `register` 的 `Tool` 列表。写文件 / 跑命令 / 网络等高权限工具刻意**不在此章**，
+留到 ch20 沙箱 / 写保护 / 命令白名单。
+
+```python
+from agent import ToolRegistry, builtin_read_tools
+reg = ToolRegistry()
+for t in builtin_read_tools():
+    reg.register(t)
+```
+
 ## 3. 本课做到 / 没做到
 
 **做到**：原生 function calling 闭环（注册表 → 注入 schema → 模型吐 tool_calls → 执行 → 观察回填）；
 工具 handler 兼容 async/sync；**错误当数据**（未知工具 / handler 异常都转观察文本，循环不炸）；
+一个**真实只读工具集**（`list_dir` / `read_file`，带 `max_chars` 截断 + 信息丰富错误串）；
 步数 + 用量 + 工具调用记录。
-**没做到（留给后续）**：技能（ch04，把「名+desc+指令」结构化按需加载）；记忆（ch05）；子代理（ch07）；
-工具沙箱/权限（后端 ch20）。工具的执行仍是循环里顺序 async，并发在边界注入。
+**没做到（留给后续）**：技能（ch04）；记忆（ch05）；子代理（ch07）；**写文件 / 跑命令 / 网络**等高权限
+工具及其沙箱 / 写保护 / 命令白名单（ch20）。工具的执行仍是循环里顺序 async，并发在边界注入。
 
 ## 4. 关联八股（~12 题）
 
@@ -120,6 +135,8 @@ asyncio.run(demo())
 10. 模型「一直调用工具不停」怎么办？`max_steps` 的角色？`finished=False` 对上层（verifier）意味着什么？
 11. prompt 注入面：工具名/描述会进 system prompt，恶意工具的 description 可能诱导模型——怎么防？
 12. 无工具时循环退化为什么？`complete(context, tools=[])` 与「直接答」等价吗？
+13. 为什么每个工具都要有**大小上限 / 超时 / 信息丰富的错误串**？（nano-harness：tool 连到世界，agent 靠错误串适应）
+14. 工具的安全边界：读 vs 写、命令白名单、网络——为什么高权限工具要靠后/单独治理（对应 ch20 沙箱）？
 
 ## 5. 生产版延伸阅读（复用 + 回填）
 
@@ -128,12 +145,17 @@ asyncio.run(demo())
 对比：教学版为讲清「注册表 + function calling + 错误当数据」而最小化；产品版把工具做成了
 **可插拔 + 可追溯 + 可授权**的完整子系统（ch04~ch07 会逐步补齐这些接缝）。
 
+另见 `docs/reference/nano_harness.md`（HF 的 nano-harness）作对照：它是**代码执行型** harness
+（agent 输出代码块、循环 `exec`，工具以函数名注入 prompt），与我们的 function calling 是两条路线。
+但它的工具设计原则完全可移植——「每个工具要 size limits、timeout、informative error strings，
+agent 才能适应」，加上 `ALLOW_WRITE` 写保护 / `ALLOW_COMMANDS` 命令白名单。这些正是 ch20 沙箱的雏形。
+
 ## 6. 运行与验证
 
 ```bash
-# L0 离线（不耗额度）：14 个用例，scripted tool_calls + MockTransport 抓协议
+# L0 离线（不耗额度）：21 个用例，scripted tool_calls + MockTransport 抓协议 + 只读工具
 uv run pytest course/ch03_tool_use/ -q
-# L1 冒烟（需 EH_SMOKE=1 + ARK key）：真 deepseek 用 add 工具算两数之和
+# L1 冒烟（需 EH_SMOKE=1 + ARK key）：真 deepseek 用 read_file 读仓库 agent.py 再作答
 EH_SMOKE=1 uv run pytest course/ch03_tool_use/ -m smoke -s
 uv run ruff check course/
 ```

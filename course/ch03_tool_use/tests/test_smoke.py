@@ -1,6 +1,7 @@
-"""L1 冒烟：真 deepseek-V4 @ ARK 跑一遍 ch03 的"工具驱动 ReAct 循环"。
+"""L1 冒烟：真 deepseek-V4 @ ARK 跑 ch03 的"工具驱动 ReAct 循环"，并**真读仓库文件**。
 
-注册一个 ``add(a, b)`` 工具，让模型用函数调用完成"两数之和"，再给结论。
+注册 ``read_file``（只读、超长截断），让模型用原生 function calling 读 ``agent.py``，
+再回答其中定义了哪些对象——验证「function calling 真正连到世界」。
 离线默认跳过：需 EH_SMOKE=1 + ARK key。
 """
 
@@ -11,10 +12,12 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from agent import AgentLoop, OpenAIChatModel, Tool, ToolRegistry
+from agent import AgentLoop, OpenAIChatModel, ToolRegistry, builtin_read_tools
 
 DEEPSEEK = "deepseek-v4-flash-ga-260731"
 ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
+
+AGENT_PY = str(Path(__file__).resolve().parent.parent / "agent.py")
 
 
 def _load_env() -> None:
@@ -40,7 +43,7 @@ def _sanitize_proxy_env(monkeypatch):
 
 
 @pytest.mark.smoke
-async def test_smoke_tool_loop_real_deepseek():
+async def test_smoke_tool_loop_reads_local_file():
     _load_env()
     if os.getenv("EH_SMOKE") != "1":
         pytest.skip("EH_SMOKE != 1，离线跳过 L1 冒烟")
@@ -57,18 +60,15 @@ async def test_smoke_tool_loop_real_deepseek():
     )
 
     registry = ToolRegistry()
-    registry.register(Tool(
-        name="add",
-        description="把两个数字相加，返回它们的和",
-        parameters={"type": "object",
-                    "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
-                    "required": ["a", "b"]},
-        handler=lambda args: str(args["a"] + args["b"]),
-    ))
+    for t in builtin_read_tools():
+        registry.register(t)
 
     loop = AgentLoop(model, registry=registry, max_steps=5)
     try:
-        res = await loop.run("请先用 add 工具计算 1234 和 5678 的和，再告诉我结果。")
+        res = await loop.run(
+            f"先用 read_file 工具读取 {AGENT_PY} 的前若干字符，"
+            "再告诉我：这个文件里定义了哪些类（class）和哪些工具函数。"
+        )
     finally:
         await model.aclose()
 

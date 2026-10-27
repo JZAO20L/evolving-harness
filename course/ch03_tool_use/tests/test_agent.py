@@ -11,6 +11,9 @@ from agent import (
     ToolCall,
     ToolRegistry,
     Usage,
+    builtin_read_tools,
+    list_dir,
+    read_file,
 )
 
 
@@ -207,6 +210,53 @@ async def test_loop_default_system_lists_tools():
     await loop.run("x")
     sys_msg = rec.calls[0][0][0]
     assert sys_msg.role == "system" and "add" in sys_msg.content
+
+# --- 只读内置工具（仿 nano-harness：连到世界 + 信息丰富错误串） --------------- #
+def test_read_file_reads_existing():
+    out = read_file(__file__, max_chars=6000)
+    assert out.startswith("import json")
+    assert "ToolRegistry" in out  # 覆盖到中部内容，未被截断到
+
+
+def test_read_file_truncates_over_limit():
+    out = read_file(__file__, max_chars=10)
+    assert len(out.split("\n", 1)[0]) == 10 and "截断" in out
+
+
+def test_read_file_missing_returns_readable_error():
+    out = read_file("/no/such/path.txt")
+    assert out.startswith("错误") and "no/such/path" in out
+
+
+def test_list_dir_lists_this_test_dir():
+    out = list_dir(".")
+    assert ".py" in out or "tests" in out
+    assert "错误" not in out
+
+
+def test_list_dir_missing_returns_readable_error():
+    assert list_dir("/no/such/dir").startswith("错误")
+
+
+async def test_builtin_read_tools_register_and_call():
+    reg = ToolRegistry()
+    for t in builtin_read_tools():
+        reg.register(t)
+    out = await reg.call(ToolCall("c1", "read_file", {"path": __file__, "max_chars": 20000}))
+    assert out.startswith("import json") and "ToolRegistry" in out
+
+
+async def test_loop_can_use_read_file_to_answer():
+    reg = ToolRegistry()
+    for t in builtin_read_tools():
+        reg.register(t)
+    rec = _Recorder([_result(tool_calls=[ToolCall("c1", "read_file", {"path": __file__})]),
+                     _result("我读了文件，里面有测试。")])
+    loop = AgentLoop(rec, registry=reg, max_steps=5)
+    res = await loop.run("读一下")
+    assert "import json" in rec.calls[1][0][-1].content  # 观察回填了真实文件内容
+    assert res.answer == "我读了文件，里面有测试。"
+
 
 async def test_loop_unknown_tool_error_as_data():
     # 未知工具也"当数据"回填且不抛
