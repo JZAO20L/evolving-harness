@@ -416,7 +416,8 @@ class PathPolicy:
 #   - 每个工具要有大小上限 / 超时 / 信息丰富的错误串，agent 才能据以适应；
 #   - 错误尽量**当数据**返回可读字符串，而不是让循环炸掉；
 #   - 只读也要过 PathPolicy 静态安全（默认 deny .env/.git/系统前缀，且不许逃出允许根）。
-# 写文件 / 跑命令 / 网络这类高权限工具留到后续章（ch20 沙箱、写保护与命令白名单）。
+# 只读工具先到此为止：本地（list_dir/read_file）+ 网络 GET（web_fetch）。
+# 写文件 / 跑任意命令 / 带可写语义网络这类更高权限工具留到后续章（ch20 沙箱、写保护与命令白名单）。
 
 
 def list_dir(path: str = ".", policy: PathPolicy | None = None) -> str:
@@ -456,10 +457,43 @@ def read_file(path: str, max_chars: int = 4000, policy: PathPolicy | None = None
     return text
 
 
-def builtin_read_tools(policy: PathPolicy | None = None) -> list[Tool]:
-    """打包两个只读工具成可直接 register 的列表（demo/冒烟用）。
+async def web_fetch(url: str, max_chars: int = 8000, timeout: float = 20.0,
+                    http_client: httpx.AsyncClient | None = None) -> str:
+    """只读网络 GET：抓取一个 ``http``/``https`` URL 的文本开头（可截断、有超时）。
 
-    默认挂一个 PathPolicy（只许读本目录、拒 .env/.git/系统前缀）——只读也安全。
+    网络也当"连到世界的只读工具"，套同一套原则：**大小上限**（``max_chars`` 截断）+
+    **超时**（``timeout``）+ **信息丰富错误串**（错误当数据，agent 可据以调整）。
+    静态护栏（薄版）：只放行 http/https scheme，堵 ``file://``、``gopher://`` 等非容器协议。
+    对内网扫描(SSRF)、域名白名单等更重的网络治理留到 ch20 沙箱。
+
+    ``http_client`` 可选：测试注入 ``httpx.MockTransport`` 用；不传则临时建一个（用完即关）。
+    """
+    scheme = url.split("://", 1)[0] if "://" in url else ""
+    if scheme not in ("http", "https"):
+        return f"错误：只支持 http/https，得到 {scheme!r}"
+    owns = http_client is None
+    client = http_client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+    try:
+        response = await client.get(url, headers={"User-Agent": "eh-teaching/0.1"})
+        # 非 2xx（404/5xx…）也当数据回填，不往上抛
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        return f"错误（{type(exc).__name__}）: {exc}"
+    finally:
+        if owns:
+            await client.aclose()
+    text = response.text
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n…[已截断：全文 {len(text)} 字符，只显示前 {max_chars}]"
+    return text
+
+
+def builtin_read_tools(policy: PathPolicy | None = None) -> list[Tool]:
+    """打包只读工具成可直接 register 的列表（demo/冒烟用）。
+
+    - 本地文件（list_dir / read_file）：默认挂一个 PathPolicy（只许读本目录、拒 .env/.git/系统前缀）。
+    - 网络（web_fetch）：只读 http/https GET，自带超时 + 大小截断 + 错误当数据。
+    写文件 / 任意命令 / 带 cookie 的网络等更高权限工具留到 ch20 沙箱。
     """
     if policy is None:
         policy = PathPolicy()
@@ -477,4 +511,11 @@ def builtin_read_tools(policy: PathPolicy | None = None) -> list[Tool]:
                          "required": ["path"]},
              handler=lambda a: read_file(a["path"], int(a.get("max_chars", 4000)),
                                          policy=policy)),
+        Tool(name="web_fetch",
+             description="只读网络 GET：抓取一个 http/https URL 的文本开头（有超时、可截断）",
+             parameters={"type": "object",
+                         "properties": {"url": {"type": "string"},
+                                        "max_chars": {"type": "integer"}},
+                         "required": ["url"]},
+             handler=lambda a: web_fetch(a["url"], int(a.get("max_chars", 8000)))),
     ]

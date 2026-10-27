@@ -56,6 +56,7 @@ ch02 用「纯 JSON act」把 ReAct 讲清楚了；但模型把动作塞进**文
 | `OpenAI function calling`（`tools` 参数） | 模型原生吐 `tool_calls`（name + JSON arguments），结构有保障 |
 | `inspect.isawaitable` | 让工具 handler 兼容 async / sync（纯函数免 async 包装） |
 | `json` | 序列化 assistant 的 tool_calls、解析模型返回的 arguments |
+| `httpx` async client（`web_fetch`） | **只读网络 GET**：抓 http/https URL 文本，带超时 + 大小截断 + 错误当数据 |
 
 ## 2. 实现的对象 + 用法
 
@@ -98,18 +99,33 @@ async def demo():
 asyncio.run(demo())
 ```
 
-### 只读内置工具 `list_dir` / `read_file` / `builtin_read_tools()`（仿 nano-harness）
+### 只读内置工具 `list_dir` / `read_file` / `web_fetch` / `builtin_read_tools()`
 演示「工具连到世界」的最小只读集：`list_dir(path)` 列目录、`read_file(path, max_chars=4000)`
-读文件（超长截断）。三个关键设计来自 nano-harness：**大小上限**（`max_chars`）+ **信息丰富错误串**
-（路径不存在返回「错误：不是文件: …」而非抛异常，agent 才能据以修正）+ **静态路径安全**。
-`builtin_read_tools()` 把它们打包成可直接 `register` 的 `Tool` 列表。写文件 / 跑命令 / 网络等
-高权限工具刻意**不在此章**，留到 ch20 沙箱 / 写保护 / 命令白名单。
+读文件（超长截断）、`web_fetch(url, max_chars=8000, timeout=20)` 抓 http/https 页面文本。
+三个关键设计来自 nano-harness：**大小上限**（`max_chars`）+ **信息丰富错误串**（缺失返回
+「错误：不是文件: …」而非抛异常，agent 才能据以修正）+ **静态安全**（本地 `PathPolicy` 路径安全、
+网络只放行 http/https scheme）。
+`builtin_read_tools()` 把它们打包成可直接 `register` 的 `Tool` 列表。写文件 / 跑命令 / 带 cookie
+网络等**更高权限**工具刻意**不在此章**，留到 ch20 沙箱 / 写保护 / 命令白名单。
 
 ```python
 from agent import ToolRegistry, builtin_read_tools
 reg = ToolRegistry()
 for t in builtin_read_tools():
-    reg.register(t)          # 默认自带 PathPolicy：只在 agent.py 所在目录内放行
+    reg.register(t)          # 本地只读挂 PathPolicy；web_fetch 只允许 http/https GET
+```
+
+### `web_fetch(url, max_chars, timeout)` —— 只读网络 GET（异步）
+网络是「连到世界」的另一半，套同一套原则：**超时 + 大小上限 + 信息丰富错误串**（错误当数据）。
+handler 是 async（内部 `await client.get`，让出事件循环，符合「顺序 async」）；`ToolRegistry.call`
+用 `inspect.isawaitable` 兼容。静态护栏（薄版）= **scheme 白名单**：只放行 `http`/`https`，
+堵 `file://`/`gopher://` 等非容器协议。SSRF 防御 / 域名白名单等更重的网络治理留到 ch20。
+测试用 `http_client` 注入 `httpx.MockTransport`，**离线**验证：
+
+```python
+from agent import web_fetch
+out = await web_fetch("https://export.arxiv.org/api/query?search_query=all:RL&max_results=5")
+# -> Atom XML 文本（或「错误（HTTPStatusError）: …」当数据）
 ```
 
 ### `PathPolicy(allow_root, deny_names, deny_prefixes)` —— 静态路径安全
@@ -128,11 +144,12 @@ for t in builtin_read_tools():
 
 **做到**：原生 function calling 闭环（注册表 → 注入 schema → 模型吐 tool_calls → 执行 → 观察回填）；
 工具 handler 兼容 async/sync；**错误当数据**（未知工具 / handler 异常都转观察文本，循环不炸）；
-一个**真实只读工具集**（`list_dir` / `read_file`，带 `max_chars` 截断 + 信息丰富错误串）；
-**静态路径安全**（`PathPolicy`：realpath 规约 + allow_root + deny 名单，拒绝当数据）；
+一个**真实只读工具集**（`list_dir` / `read_file` / `web_fetch`，都带 `max_chars`/超时截断 + 信息丰富
+错误串）；**静态安全**（本地 `PathPolicy` 路径规约 + 网络 http/https scheme 白名单，拒绝当数据）；
 步数 + 用量 + 工具调用记录。
-**没做到（留给后续）**：技能（ch04）；记忆（ch05）；子代理（ch07）；**写文件 / 跑命令 / 网络**等高权限
-工具及其沙箱 / 写保护 / 命令白名单（ch20）。工具的执行仍是循环里顺序 async，并发在边界注入。
+**没做到（留给后续）**：技能（ch04）；记忆（ch05）；子代理（ch07）；**写文件 / 跑任意命令 /
+带 cookie 或可写语义网络**等更高权限工具及其沙箱 / 写保护 / 命令白名单（ch20，本课的
+`web_fetch` 是**只读 GET** 的最小网络入口）。工具的执行仍是循环里顺序 async，并发在边界注入。
 
 ## 4. 关联八股（~12 题）
 

@@ -15,6 +15,7 @@ from agent import (
     builtin_read_tools,
     list_dir,
     read_file,
+    web_fetch,
 )
 
 
@@ -295,6 +296,47 @@ def test_list_dir_lists_this_test_dir():
 
 def test_list_dir_missing_returns_readable_error():
     assert list_dir("/no/such/dir").startswith("错误")
+
+
+# --- web_fetch：只读网络 GET（scheme 白名单 / 超时 / 截断 / 错误当数据）------ #
+def _mock_client(handler):
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _ok(handler):
+    return _mock_client(lambda req: httpx.Response(200, text=handler(req)))
+
+
+async def test_web_fetch_gets_http_text_offline():
+    client = _ok(lambda req: f"<title>{req.url} hello</title>")
+    out = await web_fetch("https://example.com/page", max_chars=200, http_client=client)
+    assert "hello" in out and not out.startswith("错误")
+
+
+async def test_web_fetch_rejects_non_http_scheme():
+    out = await web_fetch("file:///etc/passwd")
+    assert out.startswith("错误") and "只支持 http/https" in out
+    assert "只支持 http/https" in await web_fetch("gopher://x/1")
+
+
+async def test_web_fetch_error_as_data_on_http_error():
+    client = _mock_client(lambda req: httpx.Response(404, text="missing"))
+    out = await web_fetch("https://example.com/nope", http_client=client)
+    assert out.startswith("错误") and "404" in out
+
+
+async def test_web_fetch_truncates_over_limit():
+    client = _ok(lambda req: "x" * 100)
+    out = await web_fetch("https://example.com/big", max_chars=10, http_client=client)
+    assert len(out.split("\n", 1)[0]) == 10 and "截断" in out
+
+
+async def test_builtin_read_tools_registers_web_fetch():
+    reg = ToolRegistry()
+    for t in builtin_read_tools():
+        reg.register(t)
+    names = {t["function"]["name"] for t in reg.schema()}
+    assert {"list_dir", "read_file", "web_fetch"} <= names
 
 
 async def test_builtin_read_tools_register_and_call():
