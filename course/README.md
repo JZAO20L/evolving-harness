@@ -115,7 +115,7 @@ course/
 
 ```
 Agent
-  [ ] ch01 llm-call    [ ] ch02 agent-loop  [ ] ch03 tool-use
+  [x] ch01 llm-call    [x] ch02 agent-loop  [ ] ch03 tool-use
   [ ] ch04 skills      [ ] ch05 memory      [ ] ch06 plan
   [ ] ch07 sub-agent
 RSI
@@ -150,5 +150,7 @@ Frontend
 - 冒烟章约定：`test_smoke.py` 里自读仓库根 `.env`（剥引号）拿 key；未给 `EH_SMOKE=1`
   或被代理坑到一律 `pytest.skip`，保证 **离线默认全绿**。
 - 每章写完代码 → `uv run pytest course/chNN_*/ -q`（L0）→ `EH_SMOKE=1 uv run pytest course/chNN_*/ -m smoke -s`（L1）。
+- ⚠️ 每章是**独立的自包含项目**（`agent.py` / `test_agent.py` / `test_smoke.py` 各章同名）。
+  pytest 收集多章并集时同名模块会撞名报错，所以**必须按章跑**（`course/chNN_*/`），不要 `pytest course/` 一把梭。
 - 代理坑：shell 的 `no_proxy` 带裸 IPv6 CIDR 会让 httpx 建 client 时 `InvalidURL`；
   冒烟 fixture 会清掉 `ALL_PROXY/NO_PROXY` 只留安全 `no_proxy`，并保留 `HTTP_PROXY`（内网代理中继到公网 ARK）。
