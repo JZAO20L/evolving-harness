@@ -14,6 +14,7 @@
 | `test_memory.py` | L1/L2 记忆、注入 cap、写保护、`enabled=false` 零副作用 |
 | `test_bash.py` | bwrap 隔离、超时/输出上限、越界写、`.memory` 只读、无 bwrap 拒绝执行 |
 | `test_subagent.py` | 子 run 独立上下文、父子 trace 关联、子失败回填、深度上限、步数预算校验 |
+| `test_ark.py` | Responses `_build_input`/`specs_to_tools`/`_parse_output`、MockTransport 往返、`create_model` ARK 路由（离线） |
 
 ## 运行
 

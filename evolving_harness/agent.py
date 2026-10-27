@@ -1022,6 +1022,12 @@ def build_tools(state: State, workspace: str | Path) -> ToolRegistry:
     return ToolRegistry(selected)
 
 
+def _is_ark(provider: Any, url: str) -> bool:
+    if provider == "ark":
+        return True
+    return "volces.com" in str(url).lower()
+
+
 def create_model(
     state: State,
     *,
@@ -1042,6 +1048,16 @@ def create_model(
     if not url:
         raise AgentConfigError("base_url is required; set EH_BASE_URL or pass --base-url")
     try:
+        if _is_ark(runtime.get("provider"), url):
+            from .models.ark import ArkChatModel  # lazy: openai needed only for ARK
+
+            return ArkChatModel(
+                model=model_id,
+                base_url=url,
+                api_key=key,
+                temperature=runtime["temperature"],
+                max_tokens=runtime["max_tokens"],
+            )
         return OpenAIChatModel(
             model=model_id,
             base_url=url,

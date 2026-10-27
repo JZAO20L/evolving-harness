@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .agent import (
+from ..agent import (
     Agent,
     AgentConfigError,
     MaxStepsExceeded,
