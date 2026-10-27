@@ -7,14 +7,20 @@ ch03 用**原生 function calling + 工具注册表**让 agent 连到了世界�
 对「agent 演化 / RSI」（ch10）尤其关键：技能就是 agent 能力的最小演化单元——下次可以把
 `SkillLibrary` 交给演化器去增删改。
 
-文件：`agent.py`（ch03 原样保留，本课**新增** `Skill` / `SkillLibrary`，并在 `AgentLoop`
-上加了 `skills` 注入、`load_skill` 工具、`_inject_skill` 加载缝）。
+文件：`agent.py`（ch03 原样保留，本课**新增** `Skill` / `SkillLibrary`，加上**磁盘技能文件加载**
+`Skill.from_markdown` / `read_skill_file` / `SkillLibrary.load_dir`，并在 `AgentLoop` 上加
+`skills` 注入、`load_skill` 工具、`_inject_skill` 加载缝）。示例技能放在 `skills/` 目录：
+`arxiv_search.skill.md` 是一个**真实可用的网络技能**（用只读 `web_fetch` 打 arxiv API 查论文），
+也是本课的主示例。
 
 ---
 
 ## 0. 流程图
 
 ```
+  磁盘技能文件（skills/*.skill.md，frontmatter: name/description/priority）
+        │  SkillLibrary.load_dir()  /  Skill.from_markdown()
+        ▼
         ┌────────────────────────────────────────────────────────┐
         │  run(user)                                             │
         │  context = [system(工具清单 + 技能目录), user]           │
@@ -47,6 +53,10 @@ ch03 用**原生 function calling + 工具注册表**让 agent 连到了世界�
    │   │     system 消息注入 context      │                    │
    │   │   （后续步可见，不只一次性观察）  │                    │
    │   │                                │                    │
+   │   ├ 其余：按注册的工具执行          │                    │
+   │   │   例：arxiv 技能里的 web_fetch  │                    │
+   │   │   （只读网络 GET）真查 API       │                    │
+   │   │                                │                    │
    │   context += [tool tc, obs]        │                    │
    └──────────────┬─────────────────────┘                    │
                   ▼                                          │
@@ -60,6 +70,8 @@ ch03 用**原生 function calling + 工具注册表**让 agent 连到了世界�
 | `load_skill`（本课自动注册的 function tool） | 模型按名字加载技能；成功 → 完整指令注入 context |
 | 原生 function calling | 复用 ch03：模型吐 `tool_calls` 决定加载哪个技能 |
 | `SkillLibrary.list_summary()` | 渐进披露目录：按优先级降序，只给 name+desc，可截断 |
+| `Skill.from_markdown` / `read_skill_file` / `load_dir` | **磁盘技能文件加载**：frontmatter{name/desc/priority}+正文 instructions |
+| `web_fetch`（ch03 补齐的只读网络 GET） | 供 arxiv 技能执行：`load_skill` 后模型按指令真打网络 API |
 
 ## 2. 实现的对象 + 用法
 
@@ -72,6 +84,28 @@ ch03 用**原生 function calling + 工具注册表**让 agent 连到了世界�
 
 - 按 `priority` 降序列出，只给 `- 名 (优先 N): desc`，**绝不泄 instructions**（关键防线）；
 - 超 `max_items` 时尾部加 `…（共 N 个技能，只显示前 M）` 截断——目录本身也可控预算。
+
+### 磁盘技能文件：`Skill.from_markdown` / `read_skill_file` / `SkillLibrary.load_dir`
+技能不只在内存里硬编码，还能**存在磁盘上**（每个 `.skill.md` 一个技能）。格式：
+
+```markdown
+---
+name: arxiv_search
+description: 用 arxiv Atom API 检索论文元数据（标题/摘要/作者/分类/时间）
+priority: 10
+---
+……正文（markdown）就是 instructions，模型 load 后才注入 context……
+```
+
+`Skill.from_markdown(text)` 用极简 **frontmatter 解析**（`---` 夹 name/description/priority，
+零依赖 mini-YAML，不引 PyYAML）把 `{name, description}` 当目录字段、正文当 instructions；
+缺 name/description 报 `ValueError`（加载端就校验，别让坏技能进库）。`read_skill_file(path)` 读单文件，
+`SkillLibrary.load_dir(dir, glob="*.skill.md")` 批量加载目录——真实技能就以这种文件组织、可版本、可演化。
+
+`course/ch04_skills/skills/arxiv_search.skill.md` 是主示例：一个**真实可用的网络技能**，指令让它
+用只读 `web_fetch` 打 arxiv Atom API（`export.arxiv.org/api/query`）查论文元数据。真冒烟里模型
+`load_skill` 后连打两次 `web_fetch`，筛掉无关结果、按「标题+年份+要点」列了 3 篇论文——技能从
+「教学占位」变成了**真能推动工作的指令包**。
 
 ### `AgentLoop(model, registry=..., skills=..., system=..., max_steps=...)`
 ch03 循环加了一个「加载缝」：
@@ -104,12 +138,12 @@ loop = AgentLoop(MockChatModel(script=[
 ## 3. 本课做到 / 没做到
 
 **做到**：`Skill` / `SkillLibrary` 渐进披露目录（只给 name+desc、优先级排序、可截断、绝不泄
-instructions）；`AgentLoop` 自动注册 `load_skill`、把目录注入 system、加载后完整指令注入 context
-（后续步可见）；未知技能/加载失败**错误当数据**；与 ch03 只读工具**组合**（load_skill → read_file
-→ 按技能指令作答，L1 冒烟已验真）。
-**没做到（留给后续）**：技能的选择融入到多层 agent 的记忆/缓存（ch05 记忆）；子代理各自带技能
-（ch07）；技能作为**演化单元**被 RSI 自动增删改（ch10 演化、ch13）；从磁盘/远程加载技能目录
-（超 ch04 最小闭环）。
+instructions）；**磁盘技能文件加载**（frontmatter 解析 + `read_skill_file` + `load_dir`，坏技能加载端
+报错）；`AgentLoop` 自动注册 `load_skill`、把目录注入 system、加载后完整指令注入 context（后续步
+可见）；未知技能/加载失败**错误当数据**；与 ch03 只读工具**组合**——尤其 `web_fetch` 让 arxiv 技能
+**真网络执行**（L1 冒烟：模型 load_skill → 两次 web_fetch 打 arxiv → 筛无关、列 3 篇论文）。
+**没做到（留给后续）**：技能的选择融入到记忆/缓存（ch05）；子代理各自带技能（ch07）；技能作为**演化
+单元**被 RSI 自动增删改（ch10 演化、ch13）——本课磁盘 `.skill.md` 文件正是它们要操作的"技能库"。
 
 ## 4. 关联八股（~12 题）
 
@@ -136,9 +170,9 @@ ch10 演化 / ch13 RSI 会逐步补齐这些接缝）。设计关键词可在 `d
 ## 6. 运行与验证
 
 ```bash
-# L0 离线（不耗额度）：渐进披露 / 注入 / 加载 / 组合 全走 Mock
+# L0 离线（不耗额度）：渐进披露 / 注入 / 加载 / 组合 全走 Mock（含 web_fetch 的 MockTransport）
 uv run pytest course/ch04_skills/ -q
-# L1 冒烟（需 EH_SMOKE=1 + ARK key）：真 deepseek load_skill -> read_file -> 按技能三节作答
+# L1 冒烟（需 EH_SMOKE=1 + ARK key + 可联网）：真 deepseek load_skill -> 真 web_fetch 打 arxiv
 set -a; source .env; set +a
 EH_SMOKE=1 uv run pytest course/ch04_skills/ -m smoke -s
 uv run ruff check course/

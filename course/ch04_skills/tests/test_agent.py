@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import httpx
 from agent import (
     AgentLoop,
     Message,
@@ -5,10 +8,21 @@ from agent import (
     ModelResult,
     Skill,
     SkillLibrary,
+    Tool,
     ToolCall,
     ToolRegistry,
     Usage,
     builtin_read_tools,
+    read_skill_file,
+    web_fetch,
+)
+
+SKILLS_DIR = str(Path(__file__).resolve().parent.parent / "skills")
+ARXIV_XML = (
+    "<?xml version='1.0'?><feed><entry><id>http://arxiv.org/abs/2607.00001v1</id>"
+    "<title>Red-Teaming RL Agents with Language Models</title>"
+    "<published>2026-07-01T00:00:00Z</published><summary>We study jailbreaks in RL.</summary>"
+    "<category term='cs.LG'/><category term='cs.CL'/></entry></feed>"
 )
 
 
@@ -123,3 +137,70 @@ async def test_loop_load_then_use_read_file_skill_compose():
     assert any("结构化总结" in m.content for m in third)      # 技能指令仍可见
     assert res.steps == 3 and res.answer == "总结如下。"      # load -> read -> ans
     assert [t.name for t in res.tool_calls] == ["load_skill", "read_file"]
+
+
+# --- 技能文件加载器：frontmatter{name/desc/priority} + 正文 instructions ---------- #
+# --- 上手 oxo：把 arxiv_search.skill.md（磁盘真实技能）读进 Skill / SkillLibrary。---- #
+def test_skill_from_markdown_parses_frontmatter_and_body():
+    skill = Skill.from_markdown(
+        "---\nname: demo\n"
+        "description: 一个演示技能\n"
+        "priority: 7\n"
+        "---\n先 read_file 再总结。")
+    assert skill.name == "demo"
+    assert skill.description == "一个演示技能"
+    assert skill.instructions == "先 read_file 再总结。"
+    assert skill.priority == 7
+
+
+def test_skill_from_markdown_no_frontmatter_missing_required_raises():
+    # 没有 frontmatter -> 没有 name/description -> Skill 必需字段缺失，报错（校验在加载端）
+    try:
+        Skill.from_markdown("就一段正文", priority=3)
+        raise SystemExit("应报缺 name/description")
+    except ValueError:
+        pass
+
+
+def test_read_skill_file_loads_arxiv_skill_from_disk():
+    skill = read_skill_file(f"{SKILLS_DIR}/arxiv_search.skill.md")
+    assert skill.name == "arxiv_search"
+    assert "arxiv" in skill.description
+    assert "web_fetch" in skill.instructions and "export.arxiv.org/api/query" in skill.instructions
+
+
+def test_skill_library_load_dir_batches_skill_files():
+    lib = SkillLibrary.load_dir(SKILLS_DIR)
+    assert lib.get("arxiv_search").name == "arxiv_search"
+    text = lib.list_summary()
+    assert "arxiv_search" in text                                   # 目录可见名+desc
+    assert "export.arxiv.org" not in text                          # 指令不被目录泄露
+
+
+# --- 组合：加载磁盘 arxiv 技能 -> 用 web_fetch（MockTransport 离线）查询 ------------ #
+def _arxiv_client():
+    return httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, text=ARXIV_XML)))
+
+
+async def test_loop_load_arxiv_skill_then_web_fetch_offline():
+    rec = _Recorder([
+        _result("", tool_calls=[ToolCall("c1", "load_skill", {"name": "arxiv_search"})]),
+        _result("", tool_calls=[ToolCall("c2", "web_fetch", {
+            "url": "https://export.arxiv.org/api/query?search_query=all:RL", "max_chars": 8000})]),
+        _result("查到一篇：Red-Teaming RL Agents with Language Models。"),
+    ])
+    reg = ToolRegistry()
+    for t in builtin_read_tools():
+        reg.register(t)
+    client = _arxiv_client()
+    reg.register(Tool(name="web_fetch", description="", parameters={},
+                      handler=lambda a: web_fetch(a["url"], http_client=client)))  # 覆盖为 mock
+    lib = SkillLibrary.load_dir(SKILLS_DIR)
+    loop = AgentLoop(rec, registry=reg, skills=lib, max_steps=6)
+    res = await loop.run("帮我搜一下 RL 相关的论文")
+    third = rec.calls[2][0]
+    obs = [m for m in third if m.role == "tool"][-1].content
+    assert "entry" in obs and "Red-Teaming" in obs      # web_fetch 观察回填了真 parse 的 XML
+    assert res.steps == 3 and "Red-Teaming" in res.answer
+    assert [t.name for t in res.tool_calls] == ["load_skill", "web_fetch"]

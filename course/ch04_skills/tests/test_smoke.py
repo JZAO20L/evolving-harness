@@ -1,8 +1,9 @@
-"""L1 冒烟：真 deepseek-V4 @ ARK 跑 ch04 的"渐进披露技能加载"闭环。
+"""L1 冒烟：真 deepseek-V4 @ ARK + 真 arxiv 网络，跑 ch04 的"磁盘技能 + 渐进披露"闭环。
 
-注册一个 ``summarize_file`` 技能（指令 = 先 read_file 再按三节总结），配内置只读工具：
-模型从目录（只见 name+desc，不见指令）里 **load_skill**，指令才注入 context；
-随后真正用 read_file 读文件、按技能指令作答——验证渐进披露 + 加载后闭环。
+从 ``skills/arxiv_search.skill.md`` 用 ``SkillLibrary.load_dir`` 加载技能（frontmatter 给
+name/desc/priority，正文给 instructions），配上 ``web_fetch`` 只读网络工具：
+模型看目录决定 ``load_skill`` 加载 arxiv 技能 -> 按技能指令用 ``web_fetch`` 真打 arxiv API
+搜一轮论文元数据 -> 整理成条目作答。验证技能 = 真实可复用指令包 + 只读网络闭环。
 离线默认跳过：需 EH_SMOKE=1 + ARK key。
 """
 
@@ -13,12 +14,12 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from agent import AgentLoop, OpenAIChatModel, Skill, SkillLibrary, ToolRegistry, builtin_read_tools
+from agent import AgentLoop, OpenAIChatModel, SkillLibrary, ToolRegistry, builtin_read_tools
 
 DEEPSEEK = "deepseek-v4-flash-ga-260731"
 ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
 
-AGENT_PY = str(Path(__file__).resolve().parent.parent / "agent.py")
+SKILLS_DIR = str(Path(__file__).resolve().parent.parent / "skills")
 
 
 def _load_env() -> None:
@@ -43,20 +44,8 @@ def _sanitize_proxy_env(monkeypatch):
     monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
 
 
-def _summarize_skill() -> Skill:
-    return Skill(
-        name="summarize_file",
-        description="读取文件后按 类/函数/要点 三节给出结构化总结",
-        instructions=(
-            "流程：1) 用 read_file 读指定文件；2) 把内容整理成三节 —— 类 / 函数 / 要点；"
-            "3) 每节用中文一句话概括。绝不编造文件中不存在的对象。"
-        ),
-        priority=10,
-    )
-
-
 @pytest.mark.smoke
-async def test_smoke_skill_progressive_disclosure_loop():
+async def test_smoke_load_arxiv_skill_then_arxiv_search():
     _load_env()
     if os.getenv("EH_SMOKE") != "1":
         pytest.skip("EH_SMOKE != 1，离线跳过 L1 冒烟")
@@ -72,18 +61,21 @@ async def test_smoke_skill_progressive_disclosure_loop():
         max_retries=2,
     )
     registry = ToolRegistry()
-    for t in builtin_read_tools():
+    for t in builtin_read_tools():          # 含 web_fetch：只读网络 GET
         registry.register(t)
 
-    loop = AgentLoop(model, registry=registry, skills=SkillLibrary(_summarize_skill()),
-                     max_steps=6)
+    skills = SkillLibrary.load_dir(SKILLS_DIR)   # 从磁盘加载 arxiv 技能
+    loop = AgentLoop(model, registry=registry, skills=skills, max_steps=8)
     try:
-        res = await loop.run(f"用技能总结 {AGENT_PY} 这个文件。")
+        res = await loop.run(
+            "用 arxiv 技能帮我搜一下 reinforcement learning 与 red-teaming/language model "
+            "相关的论文，列出前 3 条（标题 + 年份），用中文。"
+        )
     finally:
         await model.aclose()
 
     assert res.answer.strip(), "模型应产出最终文本"
-    used = [t.name for t in res.tool_calls]
-    assert "load_skill" in used, "模型应通过 load_skill 加载技能"
+    assert "load_skill" in [t.name for t in res.tool_calls], "模型应 load_skill 加载 arxiv 技能"
+    assert any(t.name == "web_fetch" for t in res.tool_calls), "模型应按技能用 web_fetch 真查 arxiv"
     print(f"\n[smoke] finished={res.finished} steps={res.steps} usage={res.usage.total_tokens}t "
-          f"tools={used} -> {res.answer!r}")
+          f"tools={[t.name for t in res.tool_calls]} -> {res.answer!r}\n")
