@@ -135,3 +135,20 @@ Frontend
 - **每章的 hero 文件 = 当章开发内容 + 前序章已开发内容**（自包含快照，完整可运行）。如 RSI 章带 `agent.py`+`rsi.py` 两个 hero；后端章"需要时并附 agent"。不引用前章目录（避免跨目录耦合），改动随快照复制。
 - `[复用+回填]` 章节：md 为主，hero 放最小可运行版，并在 md 里串引产品实现当延伸阅读。
 - 每章带配套测试，保证「新增一行能力必有一行测试」；涉及模型的测试用假实现（Mock/脚本化响应），离线可跑。
+
+## 7. 测试分层（L0 离线 / L1 冒烟 / L2 评测）
+
+> 测试分为三层，每章写完代码后**立即跑 L0 + L1**；L2 是后续 benchmark（几十~几百条 agent run），
+> 等需要"正式评估"的章节再做。
+
+| 层 | 文件 | 打什么 | 需什么 | 断言 |
+|---|---|---|---|---|
+| **L0 离线** | `tests/test_*.py`（默认） | Mock / 脚本化响应 | 无（网络都不碰） | 严格精确 |
+| **L1 冒烟** | `tests/test_smoke.py`（`@pytest.mark.smoke`） | 真模型 deepseek-V4 @ ARK | `EH_SMOKE=1` + ARK key；离线默认跳过 | 松：能连通、非空、有用量 |
+| **L2 评测** | 后续章节 | benchmark 数据 | 大批量 key + 数据 | 指标（acc/delta 等） |
+
+- 冒烟章约定：`test_smoke.py` 里自读仓库根 `.env`（剥引号）拿 key；未给 `EH_SMOKE=1`
+  或被代理坑到一律 `pytest.skip`，保证 **离线默认全绿**。
+- 每章写完代码 → `uv run pytest course/chNN_*/ -q`（L0）→ `EH_SMOKE=1 uv run pytest course/chNN_*/ -m smoke -s`（L1）。
+- 代理坑：shell 的 `no_proxy` 带裸 IPv6 CIDR 会让 httpx 建 client 时 `InvalidURL`；
+  冒烟 fixture 会清掉 `ALL_PROXY/NO_PROXY` 只留安全 `no_proxy`，并保留 `HTTP_PROXY`（内网代理中继到公网 ARK）。

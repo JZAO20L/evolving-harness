@@ -32,6 +32,9 @@ packages = ["evolving_harness"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "smoke: L1 冒烟——打真模型(deepseek/ARK)，需 EH_SMOKE=1 + ARK_API_KEY，离线默认跳过",
+]
 
 [tool.ruff]
 line-length = 100
