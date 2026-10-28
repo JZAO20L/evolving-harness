@@ -1,3 +1,5 @@
+import asyncio
+
 from agent import (
     MockChatModel,
     ModelResult,
@@ -186,3 +188,22 @@ def test_todo_update_unknown_and_bad_status_is_error_as_data():
     upd = reg.get("todo_update")
     assert "没有叫 'NOPE'" in upd.handler({"id": "NOPE", "status": "done"})
     assert "必须是" in upd.handler({"id": "NOPE", "status": "bogus"})
+
+
+# --- 关键设计 · 运行期用户输入注入（ch02 引入：agent 不是跑完才理人） ---------------------- #
+async def test_planagent_injection_at_loop_boundary(tmp_path):
+    q: asyncio.Queue = asyncio.Queue()
+    q.put_nowait("执行中途改为先做 C")                            # 运行前已注入
+    model = _PlanModel(
+        plan_script=[_result('{"goal":"g","steps":[{"id":"P1","statement":"a"}]}'),
+                     _result('{"todos":[{"id":"T1","ref_step":"P1","summary":"a"}]}')],
+        loop_script=[_result("完成。")],
+    )
+    ag = PlanAgent(model, storage_dir=str(tmp_path / "p"), max_steps=3, input_queue=q)
+    res = await ag.run("做 A")
+    assert res.finished and res.answer == "完成。"
+    # 规划阶段（tools=None）在前；第一个主循环调用（tools 非 None）边界已把注入按优先级塞入
+    first_loop = next(msgs for msgs, tools_none in model.calls if tools_none is False)
+    marker = [m for m in first_loop if m.role == "user" and "优先处理" in m.content]
+    assert len(marker) == 1 and "执行中途改为先做 C" in marker[0].content
+    assert first_loop[-1] is marker[0]                  # 注入 = 上下文最新的 user（优先级最高）

@@ -23,12 +23,17 @@
   - **并发 run 在"调用 Agent 的边界"注入**（多个对话/run 在同一个 event loop 上交错 = 后端轨 ch15）。
   - **重试 / 指数退避 / 异常分类归模型适配器**（ch01 的 `ChatModel` 实现）；循环只看到"结果 or `ModelError`"。
   - 不在循环里每个函数调用点打散并发 / 重试 / MQ 逻辑（同 v0.3 划掉"处处 Redis/MQ"的反模式）。
+  - **agent 不是跑完才理人**（关键设计，ch02 引入、**已顺延 ch03–ch07** 各章循环，含 `PlanAgent`）：agent
+    运行中持续可被用户注入口头指令——外部协程往 `input_queue`（`asyncio.Queue`）塞指令，循环**每步
+    边界非阻塞取出**并按**优先级**处理（置为最新 user 位 + "请优先处理"标注，模型据此重新定向），而非等
+    整轮跑完。阻塞等用户确认/取消的挂起点（cancel/approve、反压）留后端轨 ch17。
 
 ## 2. 结构
 
 ```
 course/
   README.md                  # 轨序、约定、进度、章节索引
+  ch00_architecture/         # 架构第 0 章：Agent 软件工程设计（端口&适配器/五层服务/传输通道/分层判据）
   ch01_llm_call/             # 每章 = 自包含目录
     agent.py                 # hero：Agent 轨只有这一个文件，逐章长进
     README.md                # 教学单元 md
@@ -75,7 +80,7 @@ course/
 | ch | 章 | 实现对象（agent.py 增量） | 关键能力 | 八股面 |
 |---|---|---|---|---|
 | 01 | llm-call | 消息类型 + 模型适配器（chat/completions）+ usage 记账 | 一次 LLM 调用、角色/function 协议、token 统计 | completion vs response；token；temperature；system/user/assistant；function calling；stop；context window |
-| 02 | agent-loop | 循环：组装 context → 调模型 → **检测 act（action_type + JSON params）** → 判定停止/继续 → 步数/usage 记账 | 把单次调用变成"循环"，ReAct 的 act 抽取 | 循环 vs 单次调用；ReAct（Thought/Act/Observation）；JSON act 解析；停止条件；max_steps |
+| 02 | agent-loop | 循环：组装 context → 调模型 → **检测 act（action_type + JSON params）** → 判定停止/继续 → 步数/usage 记账；**关键设计：运行期用户输入注入**（`input_queue` + 每步边界优先处理） | 把单次调用变成"循环"，ReAct 的 act 抽取 | 循环 vs 单次调用；ReAct（Thought/Act/Observation）；JSON act 解析；停止条件；max_steps |
 | 03 | tool-use | `act:tool` 注册表 + act 分发 → 执行 → 结果回填；**错误当数据** | 模型驱动工具调用闭环 | function-calling 协议；为何错误当数据；tool schema/tool_choice；prompt 注入 |
 | 04 | skills | `act:skill`+ skill（名+desc+指令）+ list/load + 渐进披露（priority + 目录截断） | 把可复用指令结构化、按需加载 | vs system prompt；目录 vs 全量注入；可维护性 |
 | 05 | memory | L1/L2 笔记 + 上下文预算/压缩 + 注入 cap | 让长任务不撑爆上下文 | 短/长期记忆；token 预算；压缩陷阱；写保护 |

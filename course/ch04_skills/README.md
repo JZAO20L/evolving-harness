@@ -9,7 +9,8 @@ ch03 用**原生 function calling + 工具注册表**让 agent 连到了世界�
 
 文件：`agent.py`（ch03 原样保留，本课**新增** `Skill` / `SkillLibrary`，加上**磁盘技能文件加载**
 `Skill.from_markdown` / `read_skill_file` / `SkillLibrary.load_dir`，并在 `AgentLoop` 上加
-`skills` 注入、`load_skill` 工具、`_inject_skill` 加载缝）。示例技能放在 `skills/` 目录：
+`skills` 注入、`load_skill` 工具、`_inject_skill` 加载缝）。顺延 ch02 关键设计：**agent 不是跑完才理人**
+（`input_queue` 运行期用户输入注入，每步边界优先处理；见 ch02 §0.5）。示例技能放在 `skills/` 目录：
 `arxiv_search.skill.md` 是一个**真实可用的网络技能**（用只读 `web_fetch` 打 arxiv API 查论文），
 也是本课的主示例。
 

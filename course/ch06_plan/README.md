@@ -8,7 +8,9 @@ Plan 与后续 Todo**（用户两点要求，对齐 course/README ch06 的"拆�
 
 文件：`agent.py` = ch05 原样 + 规划子系统（本课 hero）：`Todo / TodoList`、`PlanStep / Plan`、
 `plan_task / decompose / revise_plan`、`is_plan_update` 规则门控、`PlanTracker`（JSONL 落盘）、
-`PlanAgent`（单执行循环，注册 `todo_update` 驱动完成与监控）。`skills/` 顺延自 ch05（自包含，非重点）。
+`PlanAgent`（单执行循环，注册 `todo_update` 驱动完成与监控）。顺延 ch02 关键设计：**agent 不是跑完才理人**
+（`input_queue` 运行期用户输入注入，`AgentLoop` 与 `PlanAgent` 双循环每步边界均优先处理；见 ch02 §0.5）。
+`skills/` 顺延自 ch05（自包含，非重点）。
 
 ---
 

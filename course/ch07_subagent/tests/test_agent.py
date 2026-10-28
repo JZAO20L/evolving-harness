@@ -1,3 +1,5 @@
+import asyncio
+
 from agent import (
     AgentLoop,
     Memory,
@@ -184,3 +186,53 @@ async def test_subagent_absent_when_disabled():
     mock = _SubMock([_result("普通回答")])
     res = await AgentLoop(mock).run("hi")
     assert res.answer == "普通回答"
+
+
+# --- 关键设计 · 运行期用户输入注入（ch02 引入：agent 不是跑完才理人） ---------------------- #
+def test_drain_input_empty_queue_returns_none():
+    q: asyncio.Queue = asyncio.Queue()
+    assert AgentLoop(_SubMock([]), input_queue=q)._drain_input() is None    # 空队列不阻塞
+    assert AgentLoop(_SubMock([]))._drain_input() is None                  # 未接队列
+
+
+async def test_input_injection_priority_user_turn():
+    q: asyncio.Queue = asyncio.Queue()
+    q.put_nowait("改成先调研 B")                                   # 运行前已注入
+    rec = _SubMock([_result("已按新方向处理")])
+    await AgentLoop(rec, max_steps=5, input_queue=q).run("先做 A")
+
+    first = rec.calls[0][0]                                        # 第一步的 messages
+    injected = [m for m in first if m.role == "user" and "优先处理" in m.content]
+    assert len(injected) == 1 and "改成先调研 B" in injected[0].content
+    assert first[1].role == "user" and first[1].content == "先做 A"   # 原始指令在前
+    assert first[2] is injected[0]                                    # 注入 = 最新 user（优先级最高）
+
+
+class _FeedMock(_SubMock):
+    """首个 complete 时把一条注入推进队列（模拟**运行中途**插话），再正常回脚本。"""
+
+    def __init__(self, script, queue, inject="中途改成先做 C"):
+        super().__init__(script=script)
+        self.q, self.inject, self.fed = queue, inject, False
+
+    async def complete(self, messages, tools=None):
+        result = await super().complete(messages, tools=tools)   # _SubMock 已记录 calls + 弹脚本
+        if not self.fed:
+            self.fed = True
+            self.q.put_nowait(self.inject)
+            await asyncio.sleep(0)                             # 让出一次事件循环，确认"运行期间"已入队
+        return result
+
+
+async def test_input_injection_mid_run_picked_up_next_boundary():
+    q: asyncio.Queue = asyncio.Queue()
+    rec = _FeedMock([_result("", tool_calls=[_call("c1", "ghost")]),       # step1 先跑一个工具步
+                     _result("引用新指令：已改做 C")],                      # step2 引用注入收尾
+                    q)
+    res = await AgentLoop(rec, max_steps=5, input_queue=q).run("先做 A")
+    assert res.finished and res.answer == "引用新指令：已改做 C"
+    assert not any("中途改成先做 C" in m.content for m in rec.calls[0][0])   # step1 还没看到
+    second = rec.calls[1][0]
+    marker = [m for m in second if m.role == "user" and "优先处理" in m.content]
+    assert len(marker) == 1 and "中途改成先做 C" in marker[0].content
+    assert second[-1] is marker[0]                             # 上下文中最新的 user（优先级最高）

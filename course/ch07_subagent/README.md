@@ -6,8 +6,9 @@ ch01~ch06 让 agent 能"调模型 / ReAct 循环 / 工具 / 技能渐进披露 /
 的视角 = **一个有 Agent 能力的工具（`act:subagent`）**，父循环等它收官、只收回最终文本。
 
 文件：`agent.py` = ch06 原样 + sub-agent 增量（本课 hero）：`subagent` 函数工具、`_run_subagent`
-（深度护栏 → 预算减半 → 新 `AgentLoop` 实例独立 context → 顺序 await → 只回最终文本）。`skills/`
-顺延自 ch06（自包含，非重点）。
+（深度护栏 → 预算减半 → 新 `AgentLoop` 实例独立 context → 顺序 await → 只回最终文本）。
+顺延 ch02 关键设计：**agent 不是跑完才理人**（`input_queue` 运行期用户输入注入，`AgentLoop` 与
+`PlanAgent` 双循环每步边界均优先处理；见 ch02 §0.5）。`skills/` 顺延自 ch06（自包含，非重点）。
 
 ---
 

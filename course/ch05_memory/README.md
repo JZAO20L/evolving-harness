@@ -13,7 +13,9 @@ ch01~ch04 让 agent 能「调模型 / ReAct 循环 / function calling+工具 / �
 4. 工作记忆**以 messages（system|user|assistant|tool）形式**存于循环。
 
 文件：`agent.py` = ch04 原样 + 新增 `Memory` 子系统（token 估算/预算/规则简写/模型压缩/画像/落盘回填），
-`AgentLoop` 加一个可选 `memory=` 挂钩，不给行为保持 ch04 原样。`skills/` 顺延自 ch04（自包含，非本课重点）。
+`AgentLoop` 加一个可选 `memory=` 挂钩，不给行为保持 ch04 原样。顺延 ch02 关键设计：**agent 不是跑完才理人**
+（`input_queue` 运行期用户输入注入，每步边界优先处理，先于记忆挂钩；见 ch02 §0.5）。
+`skills/` 顺延自 ch04（自包含，非本课重点）。
 
 ---
 

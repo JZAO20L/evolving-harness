@@ -765,6 +765,7 @@ class AgentLoop:
         memory: Memory | None = None,
         system: str | None = None,
         max_steps: int = 8,
+        input_queue: asyncio.Queue | None = None,
     ) -> None:
         self.model = model
         self.registry = registry or ToolRegistry()
@@ -772,8 +773,29 @@ class AgentLoop:
         self.memory = memory
         self.max_steps = max_steps
         self.system = system
+        self.input_queue = input_queue
         if skills is not None:
             self._register_load_skill()
+
+    # ---- 关键设计 · 运行期用户输入注入（ch02 引入；每步边界优先处理，顺延到本课循环） ---- #
+    def _drain_input(self) -> str | None:
+        if self.input_queue is None:
+            return None
+        try:
+            return self.input_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
+    def _ingest_user_input(self, context: list[Message]) -> int:
+        n = 0
+        while True:
+            text = self._drain_input()
+            if text is None:
+                break
+            context.append(Message(role="user",
+                                   content=f"【用户运行中插入，请优先处理】{text}"))
+            n += 1
+        return n
 
     def _register_load_skill(self) -> None:
         def _load(args: dict) -> str:
@@ -832,6 +854,7 @@ class AgentLoop:
         done: list[ToolCall] = []
 
         for step in range(1, self.max_steps + 1):
+            self._ingest_user_input(context)          # 每步边界先收用户注入（优先处理）
             if self.memory is not None:
                 await self.memory.hook_pre_step(context)  # 自动回填 + 预算超限压缩
             result = await self.model.complete(context, tools=self.registry.schema())
@@ -1298,6 +1321,8 @@ class PlanAgent:
         storage_dir: str | Path | None = None,
         system: str | None = None,
         max_steps: int = 20,
+        # 关键设计 · 运行期用户输入注入（ch02 引入、顺延本课）：
+        input_queue: asyncio.Queue | None = None,
     ) -> None:
         self.model = model
         self.registry = registry or ToolRegistry()
@@ -1305,10 +1330,31 @@ class PlanAgent:
         self.memory = memory
         self.system = system
         self.max_steps = max_steps
+        self.input_queue = input_queue
         self.tracker = tracker or (PlanTracker.load(storage_dir) if storage_dir else PlanTracker())
         self._register_todo_update()
         if skills is not None:
             self._register_load_skill()
+
+    # ---- 关键设计 · 运行期用户输入注入（ch02 引入；每步边界优先处理，顺延到本课循循环） ---- #
+    def _drain_input(self) -> str | None:
+        if self.input_queue is None:
+            return None
+        try:
+            return self.input_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
+    def _ingest_user_input(self, context: list[Message]) -> int:
+        n = 0
+        while True:
+            text = self._drain_input()
+            if text is None:
+                break
+            context.append(Message(role="user",
+                                   content=f"【用户运行中插入，请优先处理】{text}"))
+            n += 1
+        return n
 
     # ---- 工具注册 ----------------------------------------------------------- #
     def _register_todo_update(self) -> None:
@@ -1414,6 +1460,7 @@ class PlanAgent:
         total = Usage(0, 0)
         done: list[ToolCall] = []
         for step in range(1, self.max_steps + 1):
+            self._ingest_user_input(context)          # 每步边界先收用户注入（优先处理）
             if self.memory is not None:
                 await self.memory.hook_pre_step(context)
             self._refresh_progress(context)

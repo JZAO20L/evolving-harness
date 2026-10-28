@@ -9,6 +9,14 @@ ch02 先做**纯 JSON act**（模型输出里嵌 JSON，循环解析，讲清 Re
 ch03 才升级为原生 function calling。tool 角色在 ch02 的循环里作为观察回填出现，
 正式的工具注册表/function-calling 协议留给 ch03。
 
+**关键设计 · agent 不是跑完才理人（运行期用户输入注入，ch02 引入、后续各章顺延）：**
+循环不只是"启一轮跑到底才回话"，而是运行中**持续可被用户注入口头指令**。外部协程（用户/事件源）
+在 agent 运行期间往一个 ``asyncio.Queue`` 塞指令，循环在**每步边界非阻塞地取出**；一旦有注入，
+就把它作为**优先级指令**（置为最新 user 位 + 显式"请优先处理"标注）塞进上下文，让模型据此
+**重新定向**——不是等整轮跑完才理人，而是下一"步"就优先处理。并发/健壮性仍放边界不放循环：
+这个注入通道本身不拆并发，模型/tool 等待期间事件循环空闲给注入方让出场，边界检查只做"有没有新指令"。
+更重的"阻塞等待用户确认"挂起点（cancel/approve、反压）留给后端轨 ch17。
+
 涉及网络的适配器依次叫 ``OpenAIChatModel``（httpx，ch01 同款）；离线自测用 ``MockChatModel``。
 """
 
@@ -258,6 +266,8 @@ def _scan_json_objects(text: str):
 #   - Agent **内部是"顺序的 async"**：每步依赖上一步，await 让出事件循环即可，intra-turn 不并行。
 #   - 重试/指数退避/异常分类归模型适配器（ch01 的 ChatModel），循环只看到"结果 or ModelError"。
 #   - 并发 run 在"调用 Agent 的边界"注入（后端轨 ch15 示范）。
+#   - **运行期用户输入注入**：agent 不是跑完才理人——循环持一个输入队列，外部协程运行中往里塞
+#     指令，每步边界非阻塞取出并按优先级置顶处理（ch02 关键设计，后续各章顺延）。
 
 
 @dataclass
@@ -274,6 +284,8 @@ _STUB_DISPATCH_SYSTEM = """\
 {"thought": "你的中间推理", "act": {"action_type": "finish", "params": {"answer": "最终回答"}}}
 
 请按 ReAct 格式思考，最后以 action_type=finish 收尾给出 answer。
+若用户在你运行中途插入指令（消息内容以【用户运行中插入，请优先处理】标注），
+见到即**优先据此重新定向**，不要继续旧任务。
 """
 
 
@@ -287,12 +299,42 @@ class AgentLoop:
         system: str = _STUB_DISPATCH_SYSTEM,
         max_steps: int = 8,
         dispatch: callable[[Act], str] | None = None,
+        # 关键设计 · 运行期用户输入注入：外部协程在 agent 运行期间往这里塞指令，每步边界优先处理。
+        input_queue: asyncio.Queue | None = None,
     ) -> None:
         self.model = model
         self.system = system
         self.max_steps = max_steps
         # 分发器：act -> observation 文本。缺省返回"未注册工具"提示；ch03 给工具注册表闭环。
         self._dispatch = dispatch or (lambda act: f"[未注册] act={act.action_type}，工具注册表在 ch03 实现")
+        # 运行期用户输入通道：None = 关闭；给了队列，循环每步边界非阻塞检查注入。
+        self.input_queue = input_queue
+
+    # ---- 关键设计 · 运行期用户输入注入：not 跑完才理人 ------------------------ #
+    def _drain_input(self) -> str | None:
+        """非阻塞取出注入的用户指令；无则 None（不让循环卡死）。"""
+        if self.input_queue is None:
+            return None
+        try:
+            return self.input_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
+    def _ingest_user_input(self, context: list[Message]) -> int:
+        """每步边界调用：把累积的运行期注入按**优先级**塞进上下文（最新 user 位 + 显式标注）。
+
+        注入被置为当前上下文里**最新的一条 user**（ReAct 里越新越具权威），模型见到
+        "请优先处理"标注即据此重新定向——下一"步"就优先响应，而非等整轮跑完。
+        """
+        n = 0
+        while True:
+            text = self._drain_input()
+            if text is None:
+                break
+            context.append(Message(
+                role="user", content=f"【用户运行中插入，请优先处理】{text}"))
+            n += 1
+        return n
 
     async def run(self, user: str) -> LoopResult:
         context: list[Message] = []
@@ -304,6 +346,7 @@ class AgentLoop:
         acts: list[Act] = []
 
         for step in range(1, self.max_steps + 1):
+            self._ingest_user_input(context)          # 每步边界先收用户注入（优先处理）
             result = await self.model.complete(context)
             total = Usage(total.prompt_tokens + result.usage.prompt_tokens,
                           total.completion_tokens + result.usage.completion_tokens)

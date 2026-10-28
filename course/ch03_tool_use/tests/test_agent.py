@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -274,7 +275,7 @@ async def test_builtin_read_tools_carry_default_policy():
 
 def test_read_file_reads_existing():
     out = read_file(__file__, max_chars=6000)
-    assert out.startswith("import json")
+    assert out.startswith("import asyncio")   # 文件真实首行（ch03 头部 import asyncio）
     assert "ToolRegistry" in out  # 覆盖到中部内容，未被截断到
 
 
@@ -344,7 +345,7 @@ async def test_builtin_read_tools_register_and_call():
     for t in builtin_read_tools():
         reg.register(t)
     out = await reg.call(ToolCall("c1", "read_file", {"path": __file__, "max_chars": 20000}))
-    assert out.startswith("import json") and "ToolRegistry" in out
+    assert out.startswith("import asyncio") and "ToolRegistry" in out   # 真实首行 + 覆盖中部
 
 
 async def test_loop_can_use_read_file_to_answer():
@@ -367,3 +368,56 @@ async def test_loop_unknown_tool_error_as_data():
     res = await loop.run("x")
     assert "ghost" in rec.calls[1][0][-1].content
     assert res.answer == "最终答案"
+
+
+# --- 关键设计 · 运行期用户输入注入（ch02 引入：agent 不是跑完才理人） ---------------------- #
+def test_drain_input_empty_queue_returns_none():
+    q: asyncio.Queue = asyncio.Queue()
+    assert AgentLoop(_Recorder([]), input_queue=q)._drain_input() is None   # 空队列不阻塞
+    assert AgentLoop(_Recorder([]))._drain_input() is None                 # 未接队列
+
+
+async def test_input_injection_priority_user_turn():
+    q: asyncio.Queue = asyncio.Queue()
+    q.put_nowait("改成先调研 B")                                   # 运行前已注入
+    rec = _Recorder([_result("已按新方向处理")])
+    await AgentLoop(rec, max_steps=5, input_queue=q).run("先做 A")
+
+    first = rec.calls[0][0]                                        # 第一步的 messages
+    injected = [m for m in first if m.role == "user" and "优先处理" in m.content]
+    assert len(injected) == 1 and "改成先调研 B" in injected[0].content
+    # 优先级 = 最新 user 位：注入排在原始指令**之后**
+    assert first[1].role == "user" and first[1].content == "先做 A"
+    assert first[2] is injected[0]
+
+
+class _FeedMock(_Recorder):
+    """首个 complete 时把一条注入推入队列（模拟**运行中途**插话），再正常回脚本。"""
+
+    def __init__(self, script, queue, inject="中途改成先做 C"):
+        super().__init__(script=script)
+        self.q, self.inject, self.fed = queue, inject, False
+
+    async def complete(self, messages, tools=None):
+        self.calls.append((list(messages), tools))
+        if not self.fed:
+            self.fed = True
+            self.q.put_nowait(self.inject)
+            await asyncio.sleep(0)                             # 让出一次事件循环，确认"运行期间"已入队
+        return self.script.pop(0)
+
+
+async def test_input_injection_mid_run_picked_up_next_boundary():
+    q: asyncio.Queue = asyncio.Queue()
+    rec = _FeedMock([_result("", tool_calls=[_tc("ghost", x=1)]),      # step1 先跑一个工具步
+                     _result("引用新指令：已改做 C")],                  # step2 引用注入收尾
+                    q)
+    res = await AgentLoop(rec, max_steps=5, input_queue=q).run("先做 A")
+    assert res.finished and res.answer == "引用新指令：已改做 C"
+    # step1 的 complete 还看不到注入（它在运行中途才入队）
+    assert not any("中途改成先做 C" in m.content for m in rec.calls[0][0])
+    # step2 边界把它按优先级（最新 user 位）塞入：位于 step1 的 assistant/tool 之后
+    second = rec.calls[1][0]
+    marker = [m for m in second if m.role == "user" and "优先处理" in m.content]
+    assert len(marker) == 1 and "中途改成先做 C" in marker[0].content
+    assert second[-1] is marker[0]                             # 上下文中最新的 user（优先级最高）

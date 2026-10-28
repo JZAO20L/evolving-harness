@@ -328,11 +328,34 @@ class AgentLoop:
         registry: ToolRegistry | None = None,
         system: str | None = None,
         max_steps: int = 8,
+        # 关键设计 · 运行期用户输入注入（ch02 引入、顺延本课）：
+        input_queue: asyncio.Queue | None = None,
     ) -> None:
         self.model = model
         self.registry = registry or ToolRegistry()
         self.max_steps = max_steps
         self.system = system  # 不传就自动按可用工具生成默认提示
+        self.input_queue = input_queue
+
+    # ---- 关键设计 · 运行期用户输入注入（ch02 引入；每步边界优先处理） ------------ #
+    def _drain_input(self) -> str | None:
+        if self.input_queue is None:
+            return None
+        try:
+            return self.input_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
+    def _ingest_user_input(self, context: list[Message]) -> int:
+        n = 0
+        while True:
+            text = self._drain_input()
+            if text is None:
+                break
+            context.append(Message(role="user",
+                                   content=f"【用户运行中插入，请优先处理】{text}"))
+            n += 1
+        return n
 
     def _system_prompt(self) -> str:
         return (
@@ -349,6 +372,7 @@ class AgentLoop:
         done: list[ToolCall] = []
 
         for step in range(1, self.max_steps + 1):
+            self._ingest_user_input(context)          # 每步边界先收用户注入（优先处理）
             result = await self.model.complete(context, tools=self.registry.schema())
             total = Usage(total.prompt_tokens + result.usage.prompt_tokens,
                           total.completion_tokens + result.usage.completion_tokens)

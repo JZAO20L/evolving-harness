@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -137,3 +138,62 @@ async def test_run_ignores_model_error_via_adapter():
     loop = AgentLoop(_Boom(), max_steps=3)
     with pytest.raises(ModelError):
         await loop.run("x")
+
+
+# --- 关键设计 · 运行期用户输入注入（not 跑完才理人） ---------------------------- #
+def test_drain_input_empty_queue_returns_none():
+    q: asyncio.Queue = asyncio.Queue()
+    loop = AgentLoop(_Recorder([_result(_json_act("finish"))]), input_queue=q)
+    assert loop._drain_input() is None                 # 空队列非阻塞返回 None，不卡循环
+    assert AgentLoop(_Recorder([_result(_json_act("finish"))]))._drain_input() is None
+
+
+async def test_input_injection_surfaces_as_priority_user_turn():
+    # 用户已在运行中注入"改方向"指令（队列里已有一条）；循环第一步边界就把它以优先级塞入。
+    q: asyncio.Queue = asyncio.Queue()
+    q.put_nowait("改成先调研 B")
+    rec = _Recorder([_result(_json_act("check", task="x")),
+                     _result(_json_act("finish", answer="已按新方向处理"))])
+    await AgentLoop(rec, max_steps=5, dispatch=lambda act: "obs", input_queue=q).run("先做 A")
+
+    first = rec.calls[0]
+    injected = [m for m in first if m.role == "user" and "优先处理" in m.content]
+    assert len(injected) == 1 and "改成先调研 B" in injected[0].content
+    # 优先级 = 最新 user 位：注入出现在原始用户指令**之后**
+    assert first[1].role == "user" and first[1].content == "先做 A"
+    assert first[2].role == "user" and "优先处理" in first[2].content
+
+
+class _FeedMock(_Recorder):
+    """首个 complete 时把一条用户注入推进队列（模拟**运行中途**用户插话），再正常回脚本。"""
+
+    def __init__(self, script, queue, inject="中途改成先做 C"):
+        super().__init__(script=script)
+        self.q = queue
+        self.inject = inject
+        self.fed = False
+
+    async def complete(self, messages):
+        self.calls.append(list(messages))
+        if not self.fed:
+            self.fed = True
+            self.q.put_nowait(self.inject)
+            await asyncio.sleep(0)                 # 让出一次事件循环，确认"运行期间"注入已入队
+        return self.script.pop(0)
+
+
+async def test_input_injection_mid_run_picked_up_next_boundary():
+    q: asyncio.Queue = asyncio.Queue()
+    rec = _FeedMock([_result(_json_act("check", task="x")),
+                     _result(_json_act("finish", answer="引用新指令：已改做 C"))],
+                    q)
+    res = await AgentLoop(rec, max_steps=5, dispatch=lambda act: "obs", input_queue=q).run("先做 A")
+
+    assert res.finished and res.answer == "引用新指令：已改做 C"
+    # step1 的 complete 还看不到注入（它在运行中途才入队）
+    assert not any("中途改成先做 C" in m.content for m in rec.calls[0])
+    # step2 边界已把它按优先级（最新 user 位）塞入：位于 step1 的 assistant/tool 之后
+    second = rec.calls[1]
+    marker = [m for m in second if m.role == "user" and "优先处理" in m.content]
+    assert len(marker) == 1 and "中途改成先做 C" in marker[0].content
+    assert second[-1] is marker[0]                       # 它是上下文中最新的 user（优先级最高）

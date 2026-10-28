@@ -6,6 +6,8 @@ ch02 用「纯 JSON act」把 ReAct 讲清楚了；但模型把动作塞进**文
 
 文件：`agent.py`（ch01/02 的适配层原样保留，本课**新增** `ToolCall` / `Tool` / `ToolRegistry`，
 并用原生 function calling 重构了循环；ch02 的 `Act` / `parse_act` 被取代，不再需要）。
+顺延 ch02 关键设计：**agent 不是跑完才理人**（`input_queue` 运行期用户输入注入，每步边界优先处理；
+见 ch02 §0.5，本课循环同款挂钩）。
 
 ---
 
