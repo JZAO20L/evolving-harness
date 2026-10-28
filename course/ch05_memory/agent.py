@@ -9,8 +9,8 @@ ch01~ch04 让 agent 能"调模型 / ReAct 循环 / function calling+工具 / 技
 2. **工作记忆（短期记忆）**：工作记忆就是循环的 ``list[Message]``（四类 role）；tool 结果进工作
    记忆时做**基于规则提取/简写**；维护 ``max_len × threshold`` 预算，超了就**模型改写压缩**
    （旧前缀折叠成一条高密度摘要，留最近 N 条原样）。
-3. **完整记忆落盘成文件**：每轮完整 messages 追加到 transcript；当用户提到的词不在当前工作记忆中
-   却曾在文件里出现过，循环**自动回填**（grep 式取片段注入）。
+3. **完整记忆落盘成文件**：每轮完整 messages 追加成 **JSONL**（`memory.jsonl`，一行一条消息）；
+   当用户提到的词不在当前工作记忆中却曾在文件里出现过，循环**自动回填**（逐行解析取片段注入）。
 4. 工作记忆**以 messages（system|user|assistant|tool）形式**存于循环。
 
 本课复用 ch04 全部机制；``AgentLoop`` 新增可选 ``memory=``，给了走记忆挂钩，不给行为保持 ch04 原样。
@@ -621,40 +621,59 @@ def _context_has(context: list[Message], term: str) -> bool:
 
 
 class MemoryStore:
-    """完整记忆=每轮 messages 落盘成 transcript 文件；按行 grep 回填缺失片段。"""
+    """完整记忆=每轮 messages 落盘成 **JSONL** 文件；按对象解析回填缺失片段。
+
+    做记录存成 ``memory.jsonl``：**一行一个 JSON 对象**（一条 message），同轮共享一个
+    ``turn`` 时间戳——比 markdown 稳：content 里任何换行/缩进/`**` 都只是 JSON 字符串里的
+    普通字符，不会被错当成结构；角色、tool_call_id、tool_calls 都是结构化字段可恢复。
+    ``recall`` 逐行 ``json.loads`` 后按 term 扫 content，命中即取该片段回填。
+    """
 
     def __init__(self, storage_dir: str | Path | None = None) -> None:
         self.dir = Path(storage_dir) if storage_dir else Path(tempfile.mkdtemp(prefix="eh_mem_"))
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.transcript = self.dir / "transcript.md"
+        self.path = self.dir / "memory.jsonl"
 
     def append_turn(self, messages: list[Message]) -> None:
-        stamp = datetime.datetime.now().isoformat(timespec="seconds")
-        block = [f"## {stamp}"]
+        """把一整轮 messages 追加进 JSONL：同轮共用一个 ``turn`` 时间戳，每条 message 一行。"""
+        turn = datetime.datetime.now().isoformat(timespec="seconds")
+        lines = []
         for m in messages:
-            role = {"system": "system", "user": "user", "assistant": "assistant",
-                    "tool": f"tool({m.tool_call_id})"}.get(m.role, m.role)
-            block.append(f"**{role}** {m.content}")
-        with open(self.transcript, "a", encoding="utf-8") as fh:
-            fh.write("\n".join(block) + "\n\n")
+            record = {"turn": turn, "role": m.role,
+                      "content": m.content, "tool_call_id": m.tool_call_id}
+            if m.tool_calls:
+                record["tool_calls"] = [
+                    {"call_id": t.call_id, "name": t.name, "arguments": t.arguments}
+                    for t in m.tool_calls
+                ]
+            lines.append(json.dumps(record, ensure_ascii=False))
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
 
     def recall(self, context: list[Message]) -> str | None:
-        """自动回填：最新 user 提到的词若**不在已有 context(除本次提问外)**、却曾在 transcript 出现，
+        """自动回填：最新 user 提到的词若**不在已有 context(除本次提问外)**、却曾在 JSONL 出现，
         取命中的历史片段回填。知识=当前上下文去掉本次提问，避免"用户自己刚提过"被当成已具备。"""
         idx = next((i for i, m in enumerate(context) if m.role == "user"), None)
-        if idx is None or not self.transcript.exists():
+        if idx is None or not self.path.exists():
             return None
         knowledge = context[:idx]                       # 本次 user 之前的所有消息
         query = context[idx].content
         candidates = [t for t in _meaningful_terms(query) if not _context_has(knowledge, t)]
         if not candidates:
             return None
-        blob = self.transcript.read_text(encoding="utf-8")
         hits: list[str] = []
-        for line in blob.splitlines():
-            low = line.lower()
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue                             # 坏行跳过（文件脏了不能吞掉召回）
+            content = str(record.get("content", ""))
+            low = content.lower()
             if any(t.lower() in low for t in candidates):
-                hits.append(line.strip())
+                hits.append(content or line)
         if not hits:
             return None
         snippet = " | ".join(hits[:8])

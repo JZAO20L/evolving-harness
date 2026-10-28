@@ -1,4 +1,6 @@
 
+import json
+
 from agent import (
     AgentLoop,
     ContextBudget,
@@ -128,10 +130,13 @@ def _big_store(tmp_path):
     return store
 
 
-def test_store_append_turn_writes_transcript(tmp_path):
+def test_store_append_turn_writes_jsonl(tmp_path):
     _big_store(tmp_path)
-    blob = (tmp_path / "mem" / "transcript.md").read_text()
-    assert "玄武是前辈口述里的法宝" in blob and "**user**" in blob and "**assistant**" in blob
+    events = [json.loads(line) for line in (tmp_path / "mem" / "memory.jsonl").read_text().splitlines()]
+    roles = {e["role"] for e in events}
+    assert any("玄武是前辈口述里的法宝" in e["content"] for e in events)
+    assert roles == {"user", "assistant"}
+    assert len({e["turn"] for e in events}) == 1          # 同轮共享一个 turn 时间戳
 
 
 def test_store_recall_hits_missing_term_from_file():
@@ -186,9 +191,10 @@ async def test_loop_with_memory_compresses_and_persists(tmp_path):
     assert res.answer == "收到，已压缩。" and res.finished and res.steps == 2
     assert any(model.calls)                            # 压缩真实触发过（tools=None 调用）
     assert mem.compacted                                # Memory 记录了压缩事件
-    blob = (tmp_path / "mem" / "transcript.md").read_text()
-    assert "压缩摘要" in blob                            # 模型改写摘要已落盘（旧前缀折叠）
-    assert "收到，已压缩。" in blob                     # 最终结论作为记忆一份子落盘
+    events = [json.loads(line) for line in (tmp_path / "mem" / "memory.jsonl").read_text().splitlines()]
+    assert any("压缩摘要" in e["content"] for e in events)          # 模型改写摘要已落盘（旧前缀折叠）
+    assert any(e["role"] == "assistant" and "已压缩" in e["content"]
+               for e in events)                                      # 最终结论作为记忆一份子落盘
 
 
 async def test_loop_with_memory_recalls_missing_prior_from_file(tmp_path):

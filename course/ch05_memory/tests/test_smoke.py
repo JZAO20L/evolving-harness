@@ -11,6 +11,7 @@
 离线默认跳过：需 EH_SMOKE=1 + ARK key。每个模型请求真花额度。
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -98,7 +99,7 @@ async def test_smoke_cross_run_recall(tmp_path):
     finally:
         await r1.aclose()
     assert res1.answer.strip()
-    assert "玄武" in (tmp_path / "mem" / "transcript.md").read_text(), "run1 记忆应已落盘"
+    assert "玄武" in (tmp_path / "mem" / "memory.jsonl").read_text(), "run1 记忆应已落盘"
 
     # run2：另起 Memory + 循环，同一 storage_dir，问「玄武」——应从文件自动回填
     r2 = _make_rec()
@@ -131,7 +132,8 @@ async def test_smoke_compression_triggers_with_tiny_budget(tmp_path):
         await rec.aclose()
     assert res.answer.strip()
     assert mem.compacted, "极小的 budget 应在中途真实触发模型改写压缩"
-    blob = (tmp_path / "mem2" / "transcript.md").read_text()
-    assert "压缩摘要" in blob and res.answer[-12:] in blob, "压缩摘要与最终结论都应落盘"
+    events = [json.loads(line) for line in (tmp_path / "mem2" / "memory.jsonl").read_text().splitlines()]
+    assert any("压缩摘要" in e["content"] for e in events), "模型改写摘要应落盘"
+    assert any(e["role"] == "assistant" and res.answer[-12:] in e["content"] for e in events)
     print(f"\n[smoke] recall/compressed finished={res.finished} steps={res.steps} "
           f"compacted={mem.compacted} -> {res.answer!r}\n")

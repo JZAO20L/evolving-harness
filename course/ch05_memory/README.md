@@ -8,7 +8,7 @@ ch01~ch04 让 agent 能「调模型 / ReAct 循环 / function calling+工具 / �
 1. **用户画像（长期记忆）**：模型总结 + 维护固定 schema + **规则信号门控**，轮末折叠进 profile，常驻 system。
 2. **工作记忆（短期记忆）**：就是循环的 `list[Message]`（四类 role）；tool 结果进内存前**规则简写**；
    维护 `max_len × threshold` 预算，超了**模型改写压缩**（旧前缀折叠成摘要，留最近几条原样）。
-3. **完整记忆落盘成文件**：每轮完整 messages 追加到 transcript；context 里没有用户提的词、却在文件里
+3. **完整记忆落盘成文件**：每轮完整 messages 追加成 **JSONL**（`memory.jsonl`，一行一条消息）；context 里没有用户提的词、却在文件里
    出现过 → 循环**自动回填**（grep 式取片段注入）。
 4. 工作记忆**以 messages（system|user|assistant|tool）形式**存于循环。
 
@@ -24,8 +24,8 @@ ch01~ch04 让 agent 能「调模型 / ReAct 循环 / function calling+工具 / �
             schema{identity/domain/preferences/style} + 规则门控(PROFILE_CUES)
                     ▲ 轮末 maybe_update()（命中 cue 才调模型总结）
                     │
-       完整记忆(文件) ◄──────────────每轮 finalize() 追加 transcript.md
-       MemoryStore.transcript             │
+       完整记忆(文件) ◄──────────────每轮 finalize() 追加 memory.jsonl
+       MemoryStore.path                     │
                 ▲                          │
     召回: context 缺词 + 文件命中          │
     (grep 式按行) 自动回填注入 system       │
@@ -55,7 +55,7 @@ ch01~ch04 让 agent 能「调模型 / ReAct 循环 / function calling+工具 / �
 | 长期记忆 | `UserProfile` + `PROFILE_CUES` 规则门控 + 轮末 `maybe_update` | 常驻 system 的用户画像；模型低频总结、按需触发 |
 | 短期记忆 | `WorkingMemory` + `abbreviate_observation` 规则简写 | tool 结果进内存先低成本"提取+简写"，保短时精简 |
 | 预算/压缩 | `estimate_tokens`（启发式）+ `ContextBudget` + `compact_messages` | 超 `max_len×threshold` 用**模型改写**折叠旧前缀成摘要 |
-| 完整记忆 | `MemoryStore`（`append_turn` / `recall`） | 每轮 messages 落盘 transcript；缺词自动回填 grep 片段 |
+| 完整记忆 | `MemoryStore`（`append_turn` / `recall`） | 每轮 messages 落盘 `memory.jsonl`；缺词自动回填片段 |
 | 聚合 | `Memory`（`overhead` / `hook_pre_step` / `finalize`） | 给 `AgentLoop` 一根记忆缝，循环只多几行 |
 
 ## 2. 实现的对象 + 用法
@@ -92,10 +92,11 @@ threshold, keep_recent)`：`max_len×threshold` 为压缩触发线，`keep_recen
 ### 完整记忆落盘 + 自动回填
 `MemoryStore(dir)`（传 None → tempfile，不入库）：
 
-- `append_turn(messages)` 把一段完整对话（4 role）追加成 transcript 里带时间戳的块；
+- `append_turn(messages)` 把一整轮 messages 追加成 **JSONL**：一行一个 JSON 对象（一条 message），
+  同轮共享一个 `turn` 时间戳，内容角色/tool_call_id/tool_calls 结构化字段可恢复；
 - `recall(context)`：取最新 user 文本的可检索词（对中文做 2 字 bigram 近似，ASCII/技术词独立抽出；
-  停用词过滤），若该词**不在已有 knowledge（除去本次提问）**里、却**曾在 transcript 出现**，按行
-  grep 命中片段返回 `[从完整记忆检索到] …`；否则 None（不误召回）。
+  停用词过滤），若该词**不在已有 knowledge（除去本次提问）**里、却**曾在 memory.jsonl 出现**，
+  逐行 `json.loads` 命中 content 取片段返回 `[从完整记忆检索到] …`；否则 None（不误召回）。
 
 `Memory(model, *, budget, schema, storage_dir)` 聚合：
 
