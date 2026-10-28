@@ -80,7 +80,7 @@ course/
 | 04 | skills | `act:skill`+ skill（名+desc+指令）+ list/load + 渐进披露（priority + 目录截断） | 把可复用指令结构化、按需加载 | vs system prompt；目录 vs 全量注入；可维护性 |
 | 05 | memory | L1/L2 笔记 + 上下文预算/压缩 + 注入 cap | 让长任务不撑爆上下文 | 短/长期记忆；token 预算；压缩陷阱；写保护 |
 | 06 | plan | 多步规划：拆任务 → plan-then-execute；失败重规划 | 结构化拆解长任务 | plan vs 直接做；失败重规划；依赖/拓扑；token 成本 |
-| 07 | sub-agent | **`act:subagent`** 委派子 run（独立 context）、等待/深度上限 | 树状执行、上下文隔离 | 为何子代理；隔离 vs 共享；并行 vs 顺序；编排 |
+| 07 | sub-agent | `act:subagent` + `_run_subagent`（深度护栏/预算减半/新实例独立 context）、只回子最终文本 | 树状执行、上下文隔离、预算/深度护栏 | 为何子代理；隔离 vs 共享；并行 vs 顺序；深度/预算上限 |
 
 ### RSI 轨 —— 各章 hero = `agent.py` + `rsi.py`
 
@@ -116,7 +116,7 @@ course/
 ```
 Agent
   [x] ch01 llm-call    [x] ch02 agent-loop  [x] ch03 tool-use      [x] ch04 skills
-  [x] ch05 memory      [x] ch06 plan       [ ] ch07 sub-agent
+  [x] ch05 memory      [x] ch06 plan       [x] ch07 sub-agent
 RSI
   [ ] ch08 rl-loop     [ ] ch09 prompt      [ ] ch10 skills
   [ ] ch11 memory      [ ] ch12 agent       [ ] ch13 meta
