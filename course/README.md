@@ -89,14 +89,28 @@ course/
 
 ### RSI 轨 —— 各章 hero = `agent.py` + `rsi.py`
 
-| ch | 章 | 实现对象（rsi.py 增量，改 agent.py） | 关键能力 | 八股面 |
-|---|---|---|---|---|
-| 08 | rl-loop | 外环：task set → verifier 裁决 → 提议改进 → 门禁 + 版本登记 | 无训练 RL 式自改进闭环 | RL vs training-free；reward/verifier；自改进；评测污染；版本/回滚 |
-| 09 | prompt-rsi | 按 verifier 反馈优化 system prompt，测 delta | 把 prompt 当可优化对象 | prompt 工程 = 优化；过拟合；baseline |
-| 10 | skills-rsi | 演化 skills 集（增/删/改写）对评测 | skill 作为演化单元 | skill vs prompt；技能膨胀 |
-| 11 | memory-rsi | 演化记忆策略（存什么/留多久/压多少） | 记忆策略可调参 | 记忆策略优化；遗忘/保留 |
-| 12 | agent-rsi | 演化 agent 结构（loop 参数/工具集/limits） | 结构搜索 + 护栏 | 结构化搜索；任务过拟合；护栏 |
-| 13 | meta-rsi | 改进 RSI 过程本身（proposer/门禁） | 元层、复合自改进 | 元学习；能力复合；涌现 |
+> **定性：RSI = 二阶 Agent / meta-agent。** 一阶 Agent 在自己的词元空间跑 ReAct（act=动作→观测→思考→再动作）；
+> RSI 在以"rollout"为动作词的**元空间**跑同构 ReAct：**act** = 用当前 Agent 策略在 train 集上 rollout（观测=分数+trace），
+> **react** = 据表现对策略做一次组件级调整（改 prompt/工具/skills/memory/结构）。两轨一个抽象，正是"一个抽象服务两轨"。
+>
+> **核心难题不是"怎么改"，是"怎么评估 & 怎么定位"（eval + credit assignment）。** 改进方式本身只是对着各组件调；
+> 难点在于：
+> 1. **评估**——reward/verifier 怎么打（rule → LLM judge → 决策式模型），且 train/val/test 拆分、防背题；
+> 2. **定位**——失败归因到哪个组件（规则式 → LLM 分析 → 决策式模型），决定 react 往哪改。
+> 这两点跨章演进的主轴 = **评估与定位手段从"规则"逐章往"LLM 驱动 / 决策式模型"升级**；可变面（prompt→…→meta）是次要轴。
+
+| ch | 章 | 实现对象（rsi.py 增量，改 agent.py） | 关键能力 | 评估×定位 演进 | 八股面 |
+|---|---|---|---|---|---|
+| 08 | rl-loop | 外环：task set → verifier 裁决 → 提议改进 → 门禁 + 版本登记 | 无训练 RL 式自改进闭环（二阶 Agent/ReAct 骨架） | **规则式**判分（`RuleScorer`）+ **规则式**归因（`Locator`） | RL vs training-free；reward/verifier；自改进；评测污染；版本/回滚 |
+| 09 | prompt-rsi | 按 verifier 反馈优化 system prompt，测 delta；eval/locate 试水模型驱动 | 把 prompt 当可优化对象 | LLM judge 判分 + **LLM 定位**（locate+propose 合并） | prompt 工程 = 优化；过拟合；baseline |
+| 10 | skills-rsi | 演化 skills 集（增/删/改写）对评测 | skill 作为演化单元 | 定位升级到"哪条 skill 缺失/误导" | skill vs prompt；技能膨胀 |
+| 11 | memory-rsi | 演化记忆策略（存什么/留多久/压多少） | 记忆策略可调参 | 定位升级到"记忆写/读哪里出错" | 记忆策略优化；遗忘/保留 |
+| 12 | agent-rsi | 演化 agent 结构（loop 参数/工具集/limits） | 结构搜索 + 护栏 | 结构化搜索下 eval/locate 的开销与护栏 | 结构化搜索；任务过拟合；护栏 |
+| 13 | meta-rsi | 改进 RSI 过程本身（proposer/门禁/评估器） | 元层、复合自改进 | **评估器与定位器自身成为被改进对象** | 元学习；能力复合；涌现 |
+
+> **主轴的落点（ch09 起试水、ch13 收）**：评估与定位从"规则"升级到
+> **基于 LLM**（喂 trace+分数，让模型决定"改哪块 / 打几分"）再演进到
+> **基于决策式模型**（把"评估/定位"学成一个可调的策略/判别器）——即你定的"基于 LLM 或基于决策式模型"。
 
 ### Backend 轨 —— 各章 hero = `backend.py`（需要时并附 agent）
 
@@ -123,7 +137,7 @@ Agent
   [x] ch01 llm-call    [x] ch02 agent-loop  [x] ch03 tool-use      [x] ch04 skills
   [x] ch05 memory      [x] ch06 plan       [x] ch07 sub-agent
 RSI
-  [ ] ch08 rl-loop     [ ] ch09 prompt      [ ] ch10 skills
+  [x] ch08 rl-loop     [x] ch09 prompt      [ ] ch10 skills
   [ ] ch11 memory      [ ] ch12 agent       [ ] ch13 meta
 Backend
   [ ] ch14 fastapi     [ ] ch15 concurrency [ ] ch16 sse
@@ -158,3 +172,6 @@ Frontend
   pytest 收集多章并集时同名模块会撞名报错，所以**必须按章跑**（`course/chNN_*/`），不要 `pytest course/` 一把梭。
 - 代理坑：shell 的 `no_proxy` 带裸 IPv6 CIDR 会让 httpx 建 client 时 `InvalidURL`；
   冒烟 fixture 会清掉 `ALL_PROXY/NO_PROXY` 只留安全 `no_proxy`，并保留 `HTTP_PROXY`（内网代理中继到公网 ARK）。
+- **RSI 共享探针集**：仓库根 `dataset/`（与 `course/` 平级）放 RSI 轨用的最小探针集
+  （`dataset/rsi/{train,val,test}.jsonl`，verifier-first、按失败模式设计、train/val/test 不相交）。
+  RSI 各章 `rsi.py` 快照按需读取；schema 校验 `uv run pytest dataset/ -q`。详见 `dataset/README.md`。
