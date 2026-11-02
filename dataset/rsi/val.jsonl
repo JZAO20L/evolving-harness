@@ -1,0 +1,6 @@
+{"id": "fmt-05", "statement": "计算 7×8，只给一个数字，不要写过程。", "checks": ["56", "~过程", "~="]}
+{"id": "fmt-06", "statement": "一年有多少个月？只回答数字，不要解释。", "checks": ["12", "~因为"]}
+{"id": "multi-07", "statement": "列出三种关系型数据库：MySQL、PostgreSQL、SQLite。", "checks": ["MySQL", "PostgreSQL", "SQLite"]}
+{"id": "multi-08", "statement": "说出 SSE 的三个特点：单向、基于文本、可断线重连。", "checks": ["单向", "文本", "重连"]}
+{"id": "num-06", "statement": "36 的正平方根是多少？只给数字。", "checks": ["6"]}
+{"id": "num-07", "statement": "一个立方体有多少条棱？只给数字。", "checks": ["12"]}

@@ -1,0 +1,18 @@
+{"id": "fmt-01", "statement": "计算 23×7，只给一个数字，不要写计算步骤。", "checks": ["161", "~步骤", "~="]}
+{"id": "fmt-02", "statement": "1+1 等于几？只回答数字，不要解释。", "checks": ["2", "~解释", "~因为"]}
+{"id": "fmt-03", "statement": "水的化学式是什么？只给化学式，不要推导。", "checks": ["H2O", "~推导", "~因为"]}
+{"id": "fmt-04", "statement": "4 的平方是多少？只给数字，禁止出现文字。", "checks": ["16", "~平方", "~等于"]}
+{"id": "multi-01", "statement": "用三点说明 ReAct 循环为何优于单次调用，关键词各一个：迭代、观测、纠错。", "checks": ["迭代", "观测", "纠错"]}
+{"id": "multi-02", "statement": "说出 Python 三种常见可变容器：列表、字典、集合。", "checks": ["列表", "字典", "集合"]}
+{"id": "multi-03", "statement": "简述一个 HTTP 请求的三个要素：方法、URL、请求体。", "checks": ["方法", "URL", "请求体"]}
+{"id": "multi-04", "statement": "列出 Git 三个常用操作：提交、分支、合并。", "checks": ["提交", "分支", "合并"]}
+{"id": "multi-05", "statement": "说出 token 预算管理的两个手段：截断、压缩。", "checks": ["截断", "压缩"]}
+{"id": "multi-06", "statement": "列出 LLM 调用的三个常用参数：temperature、max_tokens、stop。", "checks": ["temperature", "max_tokens", "stop"]}
+{"id": "num-01", "statement": "计算 48 ÷ 6，只给数字。", "checks": ["8"]}
+{"id": "num-02", "statement": "2 的 10 次方是多少？只给数字。", "checks": ["1024"]}
+{"id": "num-03", "statement": "三角形的内角和是多少度？只给数字。", "checks": ["180"]}
+{"id": "num-04", "statement": "100 以内最大的质数是多少？只给数字。", "checks": ["97"]}
+{"id": "num-05", "statement": "5 的阶乘（5!）等于多少？只给数字。", "checks": ["120"]}
+{"id": "hard-01", "statement": "读取本仓库文件 course/ch08_rl_loop/rsi.py 顶部标题，原样返回其第一行标题文字。", "checks": ["无训练", "RL", "自改进"]}
+{"id": "hard-02", "statement": "本仓库的 RSI 外环把 agent 当作什么对象来改进？用一句话回答，须含『只改 prompt』。", "checks": ["只改 prompt"]}
+{"id": "hard-03", "statement": "根据 DESIGN，RSI 修改的是 YAML/prompt 还是 Python 代码？须回答『YAML』。", "checks": ["YAML"]}
