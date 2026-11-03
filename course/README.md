@@ -137,14 +137,14 @@ Agent
   [x] ch01 llm-call    [x] ch02 agent-loop  [x] ch03 tool-use      [x] ch04 skills
   [x] ch05 memory      [x] ch06 plan       [x] ch07 sub-agent
 RSI
-  [x] ch08 rl-loop     [x] ch09 prompt      [ ] ch10 skills
-  [ ] ch11 memory      [ ] ch12 agent       [ ] ch13 meta
+  [x] ch08 rl-loop     [x] ch09 prompt      [x] ch10 skills
+  [x] ch11 memory      [x] ch12 agent       [x] ch13 meta
 Backend
-  [ ] ch14 fastapi     [ ] ch15 concurrency [ ] ch16 sse
-  [ ] ch17 websocket   [ ] ch18 sql         [ ] ch19 redis
-  [ ] ch20 docker
+  [x] ch14 fastapi     [x] ch15 concurrency [x] ch16 sse
+  [x] ch17 websocket   [x] ch18 sql         [x] ch19 redis
+  [x] ch20 docker
 Frontend
-  [ ] ch21 gradio
+  [x] ch21 gradio
 ```
 
 ## 6. 约定
