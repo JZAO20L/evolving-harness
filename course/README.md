@@ -20,13 +20,13 @@
 - **复用 + 回填**：产品（`evolving_harness`，course 完成后成为 `harness/`）已实现的后半段（loop/tools/subagent/memory/RSI 骨架），教学章不再重写，由 md 串引现有产品实现当"生产版延伸阅读"；真正缺的章节才在 hero 文件里放干净实现。
 - **并发与健壮性都放边界，不放循环**（贯穿原则）：
   - Agent **内部是"顺序的 async"**：ReAct 循环每步依赖上一步，intra-turn 不显式并行；`await` 让出事件循环即可。
-  - **并发 run 在"调用 Agent 的边界"注入**（多个对话/run 在同一个 event loop 上交错 = 后端轨 ch15）。
+  - **并发 run 在"调用 Agent 的边界"注入**（多个对话/run 在同一个 event loop 上交错 = 后端轨 ch16）。
   - **重试 / 指数退避 / 异常分类归模型适配器**（ch01 的 `ChatModel` 实现）；循环只看到"结果 or `ModelError`"。
   - 不在循环里每个函数调用点打散并发 / 重试 / MQ 逻辑（同 v0.3 划掉"处处 Redis/MQ"的反模式）。
   - **agent 不是跑完才理人**（关键设计，ch02 引入、**已顺延 ch03–ch07** 各章循环，含 `PlanAgent`）：agent
     运行中持续可被用户注入口头指令——外部协程往 `input_queue`（`asyncio.Queue`）塞指令，循环**每步
     边界非阻塞取出**并按**优先级**处理（置为最新 user 位 + "请优先处理"标注，模型据此重新定向），而非等
-    整轮跑完。阻塞等用户确认/取消的挂起点（cancel/approve、反压）留后端轨 ch17。
+    整轮跑完。阻塞等用户确认/取消的挂起点（cancel/approve、反压）留后端轨 ch18。
 
 ## 2. 结构
 
@@ -50,16 +50,22 @@ course/
     README.md
     tests/
   ...（rsi 轨 ch09–ch13）
-  ch14_fastapi/ ...          # 后端轨：带 backend.py（+ 需要的 agent）
-  ch21_gradio/               # 前端轨：frontend.py
+  ch14_versioning/           # RSI 轨尾：版本库 / 合并 / 门控提交 / 历史回滚
+    agent.py                 # 被改进对象（冻结快照）
+    rsi.py                   # ch13 快照 + AgentConfig.from_canonical + VersionedRsi
+    versions.py              # 本章额外 hero：Version / AgentRepo / ConfigDiff / ChangeSet
+    README.md
+    tests/
+  ch15_fastapi/ ...          # 后端轨：带 backend.py（+ 需要的 agent）
+  ch22_gradio/               # 前端轨：frontend.py
 ```
 
 - `[复用+回填]` 章节：md 为主，hero 文件放**最小可运行版**，另在"生产版延伸阅读"串引 `evolving_harness` 实现。
-- 章节编号**顺着轨序统一递增**（agent ch01–07 → rsi ch08–13 → backend ch14–20 → frontend ch21），便于"第 N 章 = 第 N 堂课"。
+- 章节编号**顺着轨序统一递增**（agent ch01–07 → rsi ch08–14 → backend ch15–21 → frontend ch22），便于"第 N 章 = 第 N 堂课"。
 
 ## 3. 轨序（锁定）
 
-**Agent(7) → RSI(6) → Backend(7) → Frontend(1)**
+**Agent(7) → RSI(7) → Backend(7) → Frontend(1)**
 
 - 能力先于交付：RSI 是本项目主线论点（harness 自进化），先证能力、再包壳。
 - RSI 复用 Agent 循环的"可观察 / 可中断 / 可挂钩子"接缝；紧邻放置 = 一个抽象服务两轨。
@@ -107,6 +113,7 @@ course/
 | 11 | memory-rsi | 演化记忆策略（存什么/留多久/压多少） | 记忆策略可调参 | 定位升级到"记忆写/读哪里出错" | 记忆策略优化；遗忘/保留 |
 | 12 | agent-rsi | 演化 agent 结构（loop 参数/工具集/limits） | 结构搜索 + 护栏 | 结构化搜索下 eval/locate 的开销与护栏 | 结构化搜索；任务过拟合；护栏 |
 | 13 | meta-rsi | 改进 RSI 过程本身（proposer/门禁/评估器） | 元层、复合自改进 | **评估器与定位器自身成为被改进对象** | 元学习；能力复合；涌现 |
+| 14 | versioning | `AgentRepo` 内容寻址版本库（HEAD/原子提交/锁）+ 组件 diff/合并 + `VersionedRsi` 门控提交 | 把 agent 本身做成可版本化、可合并、可从历史选择的交付对象 | 版本库实现后，ch08–ch13 的“登记”升级为可回放谱系 | 内容寻址 vs 顺序号；HEAD vs latest；原子性；合并冲突；handler 不可序列化 |
 
 > **主轴的落点（ch09 起试水、ch13 收）**：评估与定位从"规则"升级到
 > **基于 LLM**（喂 trace+分数，让模型决定"改哪块 / 打几分"）再演进到
@@ -116,19 +123,19 @@ course/
 
 | ch | 章 | 实现对象（backend.py 增量） | 关键能力 | 八股面 |
 |---|---|---|---|---|
-| 14 | fastapi | 路由 + pydantic 模型，HTTP 跑一个 agent | 把循环包成 API | REST 语义；请求/响应模型；错误码 |
-| 15 | concurrency | async/threadpool + 作业队列 + worker + 并发上限 + per-run workspace | 并发服务 | async vs 多线程；任务队列；全局限流；进程/线程模型 |
-| 16 | sse | 服务器→客户端流式事件（接 ch01 llm-call 流式） | 单向流、事件序 | SSE vs 轮询；EventSource；断线重连 |
-| 17 | websocket | 双向流：cancel/approve 控制 | 双向实时控制 | WS vs SSE；心跳；反压 |
-| 18 | sql | Postgres/MySQL 存 State 动态段 + trace 索引 + 版本登记（替文件 Checkpointer） | 关系存储、事务 | 索引设计；事务/ACID；ORM vs raw SQL |
-| 19 | redis | 缓存 / 队列 / 频控（替 asyncio 队列、会话） | 外部中间件 | 缓存穿透/击穿/雪崩；Redis Streams；原子性 |
-| 20 | docker | 服务打包 + 容器沙箱池 | 部署 + 工具隔离 | 镜像分层；网络模式；沙箱边界 |
+| 15 | fastapi | 路由 + pydantic 模型，HTTP 跑一个 agent | 把循环包成 API | REST 语义；请求/响应模型；错误码 |
+| 16 | concurrency | async/threadpool + 作业队列 + worker + 并发上限 + per-run workspace | 并发服务 | async vs 多线程；任务队列；全局限流；进程/线程模型 |
+| 17 | sse | 服务器→客户端流式事件（接 ch01 llm-call 流式） | 单向流、事件序 | SSE vs 轮询；EventSource；断线重连 |
+| 18 | websocket | 双向流：cancel/approve 控制 | 双向实时控制 | WS vs SSE；心跳；反压 |
+| 19 | sql | Postgres/MySQL 存 State 动态段 + trace 索引 + 版本登记（替文件 Checkpointer） | 关系存储、事务 | 索引设计；事务/ACID；ORM vs raw SQL |
+| 20 | redis | 缓存 / 队列 / 频控（替 asyncio 队列、会话） | 外部中间件 | 缓存穿透/击穿/雪崩；Redis Streams；原子性 |
+| 21 | docker | 服务打包 + 容器沙箱池 | 部署 + 工具隔离 | 镜像分层；网络模式；沙箱边界 |
 
 ### Frontend 轨 —— hero = `frontend.py`
 
 | ch | 章 | 实现对象（frontend.py 增量） | 关键能力 | 八股面 |
 |---|---|---|---|---|
-| 21 | gradio | Gradio WebUI：运行 / 流式 / trace / 技能 diff 审批（对标典型 GPT/Qwen 界面） | 最简前端闭环 | 前端-后端交互；流式渲染；状态回填 |
+| 22 | gradio | Gradio WebUI：运行 / 流式 / trace / 技能 diff 审批（对标典型 GPT/Qwen 界面） | 最简前端闭环 | 前端-后端交互；流式渲染；状态回填 |
 
 ## 5. 进度（逐章勾选）
 
@@ -139,18 +146,19 @@ Agent
 RSI
   [x] ch08 rl-loop     [x] ch09 prompt      [x] ch10 skills
   [x] ch11 memory      [x] ch12 agent       [x] ch13 meta
+  [x] ch14 versioning
 Backend
-  [x] ch14 fastapi     [x] ch15 concurrency [x] ch16 sse
-  [x] ch17 websocket   [x] ch18 sql         [x] ch19 redis
-  [x] ch20 docker
+  [x] ch15 fastapi     [x] ch16 concurrency [x] ch17 sse
+  [x] ch18 websocket   [x] ch19 sql         [x] ch20 redis
+  [x] ch21 docker
 Frontend
-  [x] ch21 gradio
+  [x] ch22 gradio
 ```
 
 ## 6. 约定
 
 - 每章一个自包含目录，hero 文件**只放本章用到**的（Agent 轨每章只有 `agent.py`）。
-- **每章的 hero 文件 = 当章开发内容 + 前序章已开发内容**（自包含快照，完整可运行）。如 RSI 章带 `agent.py`+`rsi.py` 两个 hero；后端章"需要时并附 agent"。不引用前章目录（避免跨目录耦合），改动随快照复制。
+- **每章的 hero 文件 = 当章开发内容 + 前序章已开发内容**（自包含快照，完整可运行）。如 RSI 章带 `agent.py`+`rsi.py` 两个 hero；ch14 额外带 `versions.py` 作为本章新 hero；后端章"需要时并附 agent"。不引用前章目录（避免跨目录耦合），改动随快照复制。
 - `[复用+回填]` 章节：md 为主，hero 放最小可运行版，并在 md 里串引产品实现当延伸阅读。
 - 每章带配套测试，保证「新增一行能力必有一行测试」；涉及模型的测试用假实现（Mock/脚本化响应），离线可跑。
 

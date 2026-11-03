@@ -93,7 +93,7 @@ reward 支持 pointwise(规则/打分模型) 与组内差分 pairwise；`Locator
 **没做到（留给后续）**：可变面只开了 prompt（ch09 prompt-RSI、ch10 skills、ch11 memory、ch12 agent 结构逐章
 放开字段，环不重写）；`Proposer` 仍是确定性规则（ch09 换模型驱动 / 合并 locate+propose / 吃更多上下文）；
 `JudgeScorer` 仅接口就位未作主导 verifier；只测单个 task 集，**对当前 task 集过拟合 / 泛化**未做（后续
-benchmark 拆 train/val）；并发评估（边界注入，后端轨 ch15）。
+benchmark 拆 train/val）；并发评估（边界注入，后端轨 ch16）。
 
 ## 4. 关联八股（~14 题）
 

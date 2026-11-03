@@ -729,7 +729,7 @@ class Memory:
 # 并发与健壮性都放边界，不放循环（贯穿原则）：
 #   - Agent **内部是"顺序的 async"**：每步依赖上一步，await 让出事件循环即可，intra-turn 不并行。
 #   - 重试/指数退避/异常分类归模型适配器（ch01 的 ChatModel），循环只看到"结果 or ModelError"。
-#   - 并发 run 在"调用 Agent 的边界"注入（后端轨 ch15 示范）。
+#   - 并发 run 在"调用 Agent 的边界"注入（后端轨 ch16 示范）。
 
 
 @dataclass
@@ -929,7 +929,7 @@ class PathPolicy:
 #   - 错误尽量**当数据**返回可读字符串，而不是让循环炸掉；
 #   - 只读也要过 PathPolicy 静态安全（默认 deny .env/.git/系统前缀，且不许逃出允许根）。
 # 只读工具先到此为止：本地（list_dir/read_file）+ 网络 GET（web_fetch）。
-# 写文件 / 跑任意命令 / 带可写语义网络这类更高权限工具留到后续章（ch20 沙箱、写保护与命令白名单）。
+# 写文件 / 跑任意命令 / 带可写语义网络这类更高权限工具留到后续章（ch21 沙箱、写保护与命令白名单）。
 
 
 def list_dir(path: str = ".", policy: PathPolicy | None = None) -> str:
@@ -975,7 +975,7 @@ async def web_fetch(url: str, max_chars: int = 8000, timeout: float = 20.0,
 
     网络当「连到世界的只读工具」，套同一套原则：大小上限（``max_chars``）+ 超时（``timeout``）+
     信息丰富错误串（错误当数据）。静态护栏（薄版）：只放行 http/https scheme；SSRF / 域名白名单
-    等更重网络治理留 ch20。``http_client`` 供测试注入 ``httpx.MockTransport``。
+    等更重网络治理留 ch21。``http_client`` 供测试注入 ``httpx.MockTransport``。
     """
     scheme = url.split("://", 1)[0] if "://" in url else ""
     if scheme not in ("http", "https"):
@@ -1001,7 +1001,7 @@ def builtin_read_tools(policy: PathPolicy | None = None) -> list[Tool]:
 
     - 本地文件（list_dir / read_file）：默认挂一个 PathPolicy（只许读本目录、拒 .env/.git/系统前缀）。
     - 网络（web_fetch）：只读 http/https GET，自带超时 + 大小截断 + 错误当数据。
-    写文件 / 任意命令 / 带 cookie 网络等更高权限工具留到 ch20 沙箱。
+    写文件 / 任意命令 / 带 cookie 网络等更高权限工具留到 ch21 沙箱。
     """
     if policy is None:
         policy = PathPolicy()

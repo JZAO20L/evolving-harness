@@ -71,7 +71,7 @@ ch01~ch06 让 agent 能"调模型 / ReAct 循环 / 工具 / 技能渐进披露 /
 目录共享）；**只回最终文本**（经 `abbreviate_observation` 只留核心）；**同一 model/技能/工作工具共享
 **（新实例继承同一配置）；顺序 await（intra-turn 不并行）。L1 冒烟真 deepseek：父委派子代理调研并引用其要点给结论。
 **没做到（留给后续）**：子代理**并行**跑多个（`asyncio.gather` 并发委派 = 并发在边界注入，后端轨
-ch15 示范，本课单循环顺序 await）；子 trace 单独落盘 / 父 trace 记录 `subagent.start/end`+子 run_id
+ch16 示范，本课单循环顺序 await）；子 trace 单独落盘 / 父 trace 记录 `subagent.start/end`+子 run_id
 （产线运行态 §7.5，教学版最小化到"只回文本"）；子代理失败后的**自动重试/换法**；与 ch06 规划联动
 （某个 todo 委派给子代理执行的接缝已留，未当期打通）；eval 隔离关子代理（防状态漂移）。
 
@@ -96,7 +96,7 @@ ch15 示范，本课单循环顺序 await）；子 trace 单独落盘 / 父 trac
 `messages` 列表跑同一个 `Agent` 类的新实例（新 run_id、继承同一 State 配置与 runtime）；只把最终文本
 作为一条 `tool` 结果返回父循环；子 trace 单独落盘，父 trace 记录 `subagent.start/end` 与子 run_id；
 限制深度 ≤ 2、子步数 ≤ 父剩余预算一半。教学版最小化为 **`act:subagent` 工具 + `_run_subagent`
-（深度护栏/预算减半/新实例独立 context）+ 只回最终文本**几条缝；并行子代理（ch15）、子 trace 单独
+（深度护栏/预算减半/新实例独立 context）+ 只回最终文本**几条缝；并行子代理（ch16）、子 trace 单独
 落盘（运行态 §7.5）、eval 隔离关子代理留后端轨 / RSI 轨逐步补齐。
 
 ## 6. 运行与验证

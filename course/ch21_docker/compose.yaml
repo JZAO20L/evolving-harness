@@ -1,0 +1,52 @@
+# 一键启动 API + Redis；沙箱容器由 SandboxPool 在宿主 daemon 上按需创建。
+#
+#   export EH_DATA_DIR=$PWD/course/ch21_docker/.data
+#   mkdir -p "$EH_DATA_DIR"/{workspace,traces}
+#   docker build -f course/ch21_docker/sandbox.Dockerfile -t eh-sandbox:latest course/ch21_docker
+#   set -a; source .env; set +a
+#   docker compose -f course/ch21_docker/compose.yaml up --build
+#
+# EH_DATA_DIR 必须同时用于 bind 的 source 与 target：app 容器是“兄弟容器”，
+# 它把 workspace 路径交给宿主 daemon，两边路径字符串必须一致。
+name: evolving-harness
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../..
+      dockerfile: course/ch21_docker/Dockerfile
+    image: evolving-harness-api:latest
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      EH_HTTP_MOCK: "${EH_HTTP_MOCK:-0}"
+      EH_REDIS_URL: redis://redis:6379/0
+      EH_SANDBOX: docker
+      EH_SANDBOX_IMAGE: eh-sandbox:latest
+      EH_SANDBOX_POOL: "${EH_SANDBOX_POOL:-4}"
+      EH_WORKSPACE: "${EH_DATA_DIR:-/tmp/eh-data}/workspace"
+      EH_TRACE_DIR: "${EH_DATA_DIR:-/tmp/eh-data}/traces"
+      # 模型 key 只从服务端环境读取，HTTP 请求体不携带。
+      ARK_API_KEY: "${ARK_API_KEY:-}"
+      EH_API_KEY: "${EH_API_KEY:-}"
+      EH_BASE_URL: "${EH_BASE_URL:-}"
+      EH_MODEL: "${EH_MODEL:-}"
+    ports:
+      - "${EH_PORT:-8000}:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - type: bind
+        source: "${EH_DATA_DIR:-/tmp/eh-data}"
+        target: "${EH_DATA_DIR:-/tmp/eh-data}"
+    restart: unless-stopped
