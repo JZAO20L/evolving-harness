@@ -1,6 +1,6 @@
 # dataset · RSI 探针集（verifier-first）
 
-RSI 轨（course/ch08–ch13）用的**自建评估数据集**。与 `course/` 平级、跨章共享（各章 `rsi.py` 快照按需读取）。
+RSI 轨（course/ch08–ch14）用的**自建评估数据集**。与 `course/` 平级、跨章共享（各章 `rsi.py` 快照按需读取）。
 定位是**最小探针集**（~30 条）：不是大 benchmark，而是**专门为了让"评估 + 定位"有东西可咬**——每条 task
 带**确定性 rubric**，能离线（L0）判分；真模型只在 L1 冒烟里判。
 

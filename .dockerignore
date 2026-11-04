@@ -1,0 +1,17 @@
+.git
+.github
+.venv
+.env
+.env.*
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+traces
+workspace
+dataset
+docs
+course/ch0[1-9]*/
+course/ch1[0-9]*/
+course/ch2[1-9]*/
+course/ch21_docker/.data
