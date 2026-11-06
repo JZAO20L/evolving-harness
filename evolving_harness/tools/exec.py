@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import os
-import resource
 import shutil
 import signal
 from functools import partial
 from pathlib import Path
+
+try:  # POSIX-only; absent on Windows, where bash is unavailable anyway (no bwrap)
+    import resource
+except ImportError:  # pragma: no cover - platform dependent
+    resource = None  # type: ignore[assignment]
 
 from .base import Tool, ToolIsolation
 
@@ -84,12 +88,16 @@ def bash_tool(root: str | Path, protected: tuple[str, ...] = ()) -> Tool:
             command,
         ]
 
+        spawn_kwargs: dict[str, object] = {}
+        if os.name == "posix":
+            spawn_kwargs["preexec_fn"] = partial(_limit_resources, timeout_ms)
+            spawn_kwargs["start_new_session"] = True
+
         process = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            preexec_fn=partial(_limit_resources, timeout_ms),
-            start_new_session=True,
+            **spawn_kwargs,
         )
         buffer = bytearray()
         truncated = False
@@ -156,6 +164,8 @@ def bash_tool(root: str | Path, protected: tuple[str, ...] = ()) -> Tool:
 
 
 def _limit_resources(timeout_ms: int) -> None:
+    if resource is None:  # not POSIX: rlimits are unavailable
+        return
     cpu_seconds = max(1, timeout_ms // 1000 + 1)
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
     memory = MEMORY_MB * 1024 * 1024
@@ -164,6 +174,9 @@ def _limit_resources(timeout_ms: int) -> None:
 
 
 def _kill_group(process: asyncio.subprocess.Process) -> None:
+    if not hasattr(os, "killpg"):  # Windows: no process groups started above
+        process.kill()
+        return
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
